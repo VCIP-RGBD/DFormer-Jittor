@@ -108,56 +108,154 @@ def get_path(
             item_name.replace(".jpg", "").replace(".png", "") + _gt_format,
         )
 
-    return rgb_path, d_path, gt_path
+    path_result = {"rgb_path": rgb_path, "gt_path": gt_path}
+    for modal in x_modal:
+        path_result[modal + "_path"] = eval(modal + "_path")
+    return path_result
 
 
 class RGBXDataset(Dataset):
     """RGBX Dataset class for multi-modal semantic segmentation."""
-    
-    def __init__(self, setting, split_name, preprocess=None, batch_size=1):
+
+    def __init__(self, setting, split_name, preprocess=None, file_length=None):
         super(RGBXDataset, self).__init__()
         self._split_name = split_name
-        self._rgb_path = setting['rgb_root']
-        self._rgb_format = setting['rgb_format']
-        self._gt_path = setting['gt_root']
-        self._gt_format = setting['gt_format']
-        self._transform_gt = setting['transform_gt']
-        self._x_path = setting['x_root']
-        self._x_format = setting['x_format']
-        self._x_single_channel = setting['x_single_channel']
-        self._train_source = setting['train_source']
-        self._eval_source = setting['eval_source']
-        self._class_names = setting['class_names']
+        self._rgb_path = setting["rgb_root"]
+        self._rgb_format = setting["rgb_format"]
+        self._gt_path = setting["gt_root"]
+        self._gt_format = setting["gt_format"]
+        self._transform_gt = setting["transform_gt"]
+        self._x_path = setting["x_root"]
+        self._x_format = setting["x_format"]
+        self._x_single_channel = setting["x_single_channel"]
+        self._train_source = setting["train_source"]
+        self._eval_source = setting["eval_source"]
+        self.class_names = setting["class_names"]
+        self._file_names = self._get_file_names(split_name)
+        self._file_length = file_length
         self.preprocess = preprocess
-        self.batch_size = batch_size
-
-        # Determine dataset name from path
-        if 'NYU' in self._rgb_path or 'nyu' in self._rgb_path:
-            self.dataset_name = 'NYUDepthv2'
-        elif 'SUNRGBD' in self._rgb_path or 'sunrgbd' in self._rgb_path:
-            self.dataset_name = 'SUNRGBD'
-        else:
-            self.dataset_name = 'Unknown'
-
-        # Load file lists
-        if split_name == 'train':
-            with open(self._train_source, 'r') as f:
-                self.data_list = f.read().splitlines()
-        else:
-            with open(self._eval_source, 'r') as f:
-                self.data_list = f.read().splitlines()
-
-        self.total_len = len(self.data_list)
+        self.dataset_name = setting["dataset_name"]
+        self.x_modal = setting.get("x_modal", ["d"])
+        self.backbone = setting["backbone"]
 
     def __len__(self):
-        return self.total_len
+        if self._file_length is not None:
+            return self._file_length
+        return len(self._file_names)
+
+    def _get_file_names(self, split_name):
+        """Get file names for the specified split."""
+        if split_name == "train":
+            file_path = self._train_source
+        else:
+            file_path = self._eval_source
+
+        with open(file_path, 'r') as f:
+            file_names = f.read().splitlines()
+        return file_names
+
+    def _construct_new_file_names(self, length):
+        """Construct new file names for training with specified length."""
+        assert isinstance(length, int)
+        files_len = len(self._file_names)
+        new_file_names = self._file_names * (length // files_len)
+
+        rand_indices = np.random.choice(files_len, length % files_len, replace=False)
+        new_file_names += [self._file_names[i] for i in rand_indices]
+
+        return new_file_names
 
     def __getitem__(self, index):
         """Get a single data sample."""
-        if index >= self.total_len:
-            index = index % self.total_len
+        if self._file_length is not None:
+            item_name = self._construct_new_file_names(self._file_length)[index]
+        else:
+            item_name = self._file_names[index]
 
-        item_name = self.data_list[index]
+        path_dict = get_path(
+            self.dataset_name,
+            self._rgb_path,
+            self._rgb_format,
+            self._x_path,
+            self._x_format,
+            self._gt_path,
+            self._gt_format,
+            self.x_modal,
+            item_name,
+        )
+
+        if self.dataset_name == "SUNRGBD" and self.backbone.startswith("DFormerv2"):
+            rgb_mode = "RGB"  # some checkpoints are run by BGR and some are on RGB, need to select
+        else:
+            rgb_mode = "BGR"
+        rgb = self._open_image(path_dict["rgb_path"], rgb_mode)
+
+        gt = self._open_image(path_dict["gt_path"], cv2.IMREAD_GRAYSCALE, dtype=np.uint8)
+        if self._transform_gt:
+            gt = self._gt_transform(gt)
+
+        x = {}
+        for modal in self.x_modal:
+            if modal == "d":
+                x[modal] = self._open_image(path_dict[modal + "_path"], cv2.IMREAD_GRAYSCALE)
+                # DFormerv2 expects single channel depth, DFormerv1 expects 3-channel
+                if self.backbone.startswith("DFormerv2"):
+                    # Keep single channel for DFormerv2, add channel dimension
+                    x[modal] = np.expand_dims(x[modal], axis=2)
+                else:
+                    # Convert to 3-channel for DFormerv1
+                    x[modal] = cv2.merge([x[modal], x[modal], x[modal]])
+            else:
+                x[modal] = self._open_image(path_dict[modal + "_path"], "RGB")
+        if len(self.x_modal) == 1:
+            x = x[self.x_modal[0]]
+
+        if self.dataset_name == "Scannet":
+            rgb = cv2.resize(rgb, (640, 480), interpolation=cv2.INTER_LINEAR)
+            x = cv2.resize(x, (640, 480), interpolation=cv2.INTER_LINEAR)
+            gt = cv2.resize(gt, (640, 480), interpolation=cv2.INTER_NEAREST)
+        elif self.dataset_name == "StanFord2D3D":
+            rgb = cv2.resize(rgb, dsize=(480, 480), interpolation=cv2.INTER_LINEAR)
+            x = cv2.resize(x, dsize=(480, 480), interpolation=cv2.INTER_LINEAR)
+            gt = cv2.resize(gt, dsize=(480, 480), interpolation=cv2.INTER_NEAREST)
+
+        if self.preprocess is not None:
+            rgb, gt, x = self.preprocess(rgb, gt, x)
+
+        rgb = jt.array(np.ascontiguousarray(rgb)).float()
+        gt = jt.array(np.ascontiguousarray(gt)).int64()
+        x = jt.array(np.ascontiguousarray(x)).float()
+
+        output_dict = dict(data=rgb, label=gt, modal_x=x, fn=str(path_dict["rgb_path"]), n=len(self._file_names))
+
+        return output_dict
+
+    def _open_image(self, path, mode=cv2.IMREAD_COLOR, dtype=None):
+        """Open and read image file."""
+        if mode == "RGB":
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        elif mode == "BGR":
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+        else:
+            img = cv2.imread(path, mode)
+
+        if dtype is not None:
+            img = img.astype(dtype)
+
+        return img
+
+    def _gt_transform(self, gt):
+        """Transform ground truth labels."""
+        # NYU Depth v2 specific transform
+        if self.dataset_name == "NYUDepthv2":
+            # Map 40 classes
+            return gt
+        elif self.dataset_name == "SUNRGBD":
+            # Map 37 classes
+            return gt
+        else:
+            return gt
         
         # Get file paths
         rgb_path, x_path, gt_path = get_path(
@@ -183,8 +281,8 @@ class RGBXDataset(Dataset):
             modal_x = cv2.imread(x_path, cv2.IMREAD_GRAYSCALE)
             if modal_x is None:
                 raise FileNotFoundError(f"Modal image not found: {x_path}")
+            # Keep as single channel for DFormerv2
             modal_x = np.expand_dims(modal_x, axis=2)
-            modal_x = np.concatenate([modal_x, modal_x, modal_x], axis=2)
         else:
             modal_x = cv2.imread(x_path, cv2.IMREAD_COLOR)
             if modal_x is None:
@@ -197,7 +295,7 @@ class RGBXDataset(Dataset):
             raise FileNotFoundError(f"Ground truth not found: {gt_path}")
 
         # Apply transformations if specified
-        if self._transform_gt:
+        if self._transform_gt and callable(self._transform_gt):
             gt = self._transform_gt(gt)
 
         # Apply preprocessing

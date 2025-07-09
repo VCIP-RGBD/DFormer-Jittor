@@ -96,11 +96,113 @@ class BaseModule(nn.Module):
         self._is_init = False
     
     def init_weights(self):
-        """Initialize weights."""
+        """Initialize weights based on configuration."""
         if self.init_cfg is not None:
-            # TODO: Implement weight initialization based on config
-            pass
+            # Initialize based on configuration
+            if isinstance(self.init_cfg, dict):
+                self._init_weights_from_config(self.init_cfg)
+            elif isinstance(self.init_cfg, list):
+                for cfg in self.init_cfg:
+                    self._init_weights_from_config(cfg)
+        else:
+            # Default initialization
+            self._default_init_weights()
         self._is_init = True
+
+    def _init_weights_from_config(self, cfg):
+        """Initialize weights from a single config."""
+        init_type = cfg.get('type', 'normal')
+
+        if init_type == 'normal':
+            mean = cfg.get('mean', 0.0)
+            std = cfg.get('std', 0.01)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        nn.init.gauss_(m.weight, mean, std)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            nn.init.constant_(m.bias, bias)
+
+        elif init_type == 'xavier':
+            gain = cfg.get('gain', 1.0)
+            bias = cfg.get('bias', 0.0)
+            distribution = cfg.get('distribution', 'normal')
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        if distribution == 'normal':
+                            nn.init.xavier_gauss_(m.weight, gain)
+                        else:
+                            nn.init.xavier_uniform_(m.weight, gain)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            nn.init.constant_(m.bias, bias)
+
+        elif init_type == 'kaiming':
+            a = cfg.get('a', 0)
+            mode = cfg.get('mode', 'fan_out')
+            nonlinearity = cfg.get('nonlinearity', 'relu')
+            bias = cfg.get('bias', 0.0)
+            distribution = cfg.get('distribution', 'normal')
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        if distribution == 'normal':
+                            nn.init.relu_invariant_gauss_(m.weight, mode)
+                        else:
+                            nn.init.invariant_uniform_(m.weight, mode)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            nn.init.constant_(m.bias, bias)
+
+        elif init_type == 'constant':
+            val = cfg.get('val', 0.0)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        nn.init.constant_(m.weight, val)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            nn.init.constant_(m.bias, bias)
+
+        elif init_type == 'trunc_normal':
+            mean = cfg.get('mean', 0.0)
+            std = cfg.get('std', 0.02)
+            a = cfg.get('a', -2.0)
+            b = cfg.get('b', 2.0)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        trunc_normal_(m.weight, mean, std, a, b)
+                        if hasattr(m, 'bias') and m.bias is not None:
+                            nn.init.constant_(m.bias, bias)
+
+    def _default_init_weights(self):
+        """Default weight initialization."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                nn.init.relu_invariant_gauss_(m.weight, 'fan_out')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm, LayerNorm)):
+                if hasattr(m, 'weight') and m.weight is not None:
+                    nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
 
 
 class FFN(nn.Module):
@@ -149,37 +251,96 @@ class FFN(nn.Module):
 
 
 def load_state_dict(model, state_dict, strict=True):
-    """Load state dict to model."""
-    # TODO: Implement proper state dict loading for Jittor
+    """Load state dict to model with proper error handling and compatibility.
+
+    Args:
+        model: Jittor model to load weights into
+        state_dict: Dictionary containing model weights
+        strict: Whether to strictly enforce key matching
+
+    Returns:
+        Tuple of (missing_keys, unexpected_keys)
+    """
     missing_keys = []
     unexpected_keys = []
-    
+    error_msgs = []
+
+    # Get current model state dict
     model_state_dict = model.state_dict()
-    
+
+    # Track which keys we've processed
+    processed_keys = set()
+
     for key, value in state_dict.items():
         if key in model_state_dict:
             try:
+                # Convert PyTorch tensor to Jittor tensor if needed
+                if hasattr(value, 'detach'):  # PyTorch tensor
+                    value = jt.array(value.detach().cpu().numpy())
+                elif not isinstance(value, jt.Var):  # numpy array or other
+                    value = jt.array(value)
+
+                # Check shape compatibility
+                if model_state_dict[key].shape != value.shape:
+                    error_msg = f"Size mismatch for {key}: model expects {model_state_dict[key].shape}, got {value.shape}"
+                    error_msgs.append(error_msg)
+                    if strict:
+                        raise RuntimeError(error_msg)
+                    else:
+                        print(f"Warning: {error_msg}")
+                        continue
+
+                # Assign the value
                 model_state_dict[key].assign(value)
-            except:
-                print(f"Failed to load parameter {key}")
-                missing_keys.append(key)
+                processed_keys.add(key)
+
+            except Exception as e:
+                error_msg = f"Failed to load parameter {key}: {str(e)}"
+                error_msgs.append(error_msg)
+                if strict:
+                    raise RuntimeError(error_msg)
+                else:
+                    print(f"Warning: {error_msg}")
         else:
             unexpected_keys.append(key)
-    
+
+    # Find missing keys
+    for key in model_state_dict.keys():
+        if key not in processed_keys:
+            missing_keys.append(key)
+
+    # Report results
     if missing_keys:
-        print(f"Missing keys: {missing_keys}")
+        print(f"Missing keys ({len(missing_keys)}): {missing_keys}")
     if unexpected_keys:
-        print(f"Unexpected keys: {unexpected_keys}")
-    
-    if strict and (missing_keys or unexpected_keys):
-        raise RuntimeError(f"Error loading state dict: missing {len(missing_keys)} keys, unexpected {len(unexpected_keys)} keys")
+        print(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys}")
+    if error_msgs and not strict:
+        print(f"Errors during loading: {error_msgs}")
+
+    if strict and (missing_keys or unexpected_keys or error_msgs):
+        raise RuntimeError(
+            f"Error loading state dict: "
+            f"missing {len(missing_keys)} keys, "
+            f"unexpected {len(unexpected_keys)} keys, "
+            f"{len(error_msgs)} errors"
+        )
+
+    return missing_keys, unexpected_keys
 
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    """Initialize tensor with truncated normal distribution."""
-    # TODO: Implement proper truncated normal initialization
-    nn.init.gauss_(tensor, mean, std)
-    return tensor
+    """Initialize tensor with truncated normal distribution.
+
+    Args:
+        tensor: Tensor to initialize
+        mean: Mean of the normal distribution
+        std: Standard deviation of the normal distribution
+        a: Lower bound for truncation
+        b: Upper bound for truncation
+    """
+    # Use the implementation from utils.dformer_utils
+    from utils.dformer_utils import trunc_normal_ as _trunc_normal_impl
+    return _trunc_normal_impl(tensor, mean, std, a, b)
 
 
 class LayerNorm(nn.Module):
@@ -498,20 +659,42 @@ class DFormer(BaseModule):
             try:
                 # Load pretrained weights
                 print(f"Loading pretrained weights from {pretrained}")
-                # TODO: Implement proper weight loading
-                pass
+
+                # Import load_checkpoint from utils
+                from utils.dformer_utils import load_checkpoint
+
+                # Load checkpoint
+                checkpoint = load_checkpoint(self, pretrained, strict=False)
+
+                print(f"Successfully loaded pretrained weights from {pretrained}")
+
             except Exception as e:
                 print(f"Failed to load pretrained weights: {e}")
+                # Fall back to default initialization
+                self._default_init_weights()
         else:
             # Initialize weights using default initialization
-            for m in self.modules():
-                if isinstance(m, nn.Linear):
-                    trunc_normal_(m.weight, std=0.02)
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
-                elif isinstance(m, nn.LayerNorm):
+            self._default_init_weights()
+
+    def _default_init_weights(self):
+        """Default weight initialization for DFormer."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+            elif isinstance(m, LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+            elif isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                nn.init.relu_invariant_gauss_(m.weight, 'fan_out')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm)):
+                if hasattr(m, 'weight') and m.weight is not None:
                     nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
 
     def execute(self, x, x_e):
         """Forward function."""

@@ -3,27 +3,29 @@
 # DFormer Jittor Training Script
 # Adapted from PyTorch version for Jittor framework
 
-# Set environment variables
+GPUS=2
+NNODES=1
+NODE_RANK=${NODE_RANK:-0}
+PORT=${PORT:-29158}
+MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+
 export CUDA_VISIBLE_DEVICES="0,1"
 
-# Training configuration
-GPUS=2
-CONFIG="local_configs.NYUDepthv2.DFormerv2_S"
-BATCH_SIZE=8
-EPOCHS=500
-LR=6e-5
+# For single GPU testing, use GPUS=1 and CUDA_VISIBLE_DEVICES="0"
+# GPUS=1
+# export CUDA_VISIBLE_DEVICES="0"
 
-# Run training
-python utils/train.py \
-    --config=$CONFIG \
+PYTHONPATH="$(dirname $0)/..":"$(dirname $0)":$PYTHONPATH \
+    python utils/train.py \
+    --config=local_configs.NYUDepthv2.DFormerv2_S \
     --gpus=$GPUS \
-    --batch_size=$BATCH_SIZE \
-    --epochs=$EPOCHS \
-    --lr=$LR \
+    --no-sliding \
     --syncbn \
+    --mst \
     --no-amp \
     --val_amp \
-    --pad_SUNRGBD
+    --pad_SUNRGBD \
+    --no-use_seed
 
 # Available configurations for DFormers on NYUDepthv2:
 # local_configs.NYUDepthv2.DFormer_Large

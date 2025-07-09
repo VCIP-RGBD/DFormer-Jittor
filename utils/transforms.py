@@ -34,10 +34,8 @@ class ToTensor:
 
     def __call__(self, image):
         if isinstance(image, np.ndarray):
-            # Convert HWC to CHW format
             if len(image.shape) == 3:
                 image = image.transpose(2, 0, 1)
-            # Convert to float32 and normalize to [0, 1]
             image = image.astype(np.float32) / 255.0
             return jt.array(image)
         return image
@@ -52,7 +50,6 @@ class Normalize:
 
     def __call__(self, tensor):
         if isinstance(tensor, jt.Var):
-            # Normalize each channel
             for i in range(len(self.mean)):
                 tensor[i] = (tensor[i] - self.mean[i]) / self.std[i]
         return tensor
@@ -89,7 +86,6 @@ class RandomCrop:
         crop_h, crop_w = self.crop_size
 
         if h <= crop_h and w <= crop_w:
-            # Pad if image is smaller than crop size
             pad_h = max(0, crop_h - h)
             pad_w = max(0, crop_w - w)
             image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
@@ -97,7 +93,6 @@ class RandomCrop:
                 label = cv2.copyMakeBorder(label, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=255)
             h, w = image.shape[:2]
 
-        # Random crop
         start_h = random.randint(0, h - crop_h)
         start_w = random.randint(0, w - crop_w)
 
@@ -175,7 +170,12 @@ def pad_image_to_shape(img, shape, border_mode, value):
     margin[2] = pad_width // 2
     margin[3] = pad_width // 2 + pad_width % 2
 
+    original_shape = img.shape
+    
     img = cv2.copyMakeBorder(img, margin[0], margin[1], margin[2], margin[3], border_mode, value=value)
+    
+    if len(original_shape) == 3 and original_shape[2] == 1 and len(img.shape) == 2:
+        img = np.expand_dims(img, axis=2)
 
     return img, margin
 
@@ -224,20 +224,9 @@ def resize_ensure_longest_edge(img, edge_length, interpolation_mode=cv2.INTER_LI
 
 def normalize(img, mean, std):
     """Normalize image with mean and standard deviation."""
-    # Convert to float32 if not already
-    if img.dtype != np.float32:
-        img = img.astype(np.float32)
-    
-    # Normalize to [0, 1] if values are in [0, 255]
-    if img.max() > 1.0:
-        img = img / 255.0
-    
-    # Apply mean and std normalization
-    mean = np.array(mean, dtype=np.float32)
-    std = np.array(std, dtype=np.float32)
-    
-    img = (img - mean) / std
-    
+    img = img.astype(np.float64) / 255.0
+    img = img - mean
+    img = img / std
     return img
 
 
@@ -249,56 +238,3 @@ def denormalize(img, mean, std):
     img = img * std + mean
     
     return img
-
-
-
-
-
-class RandomHorizontalFlip(object):
-    """Random horizontal flip transform."""
-    
-    def __init__(self, p=0.5):
-        self.p = p
-
-    def __call__(self, img, mask=None):
-        if random.random() < self.p:
-            img = cv2.flip(img, 1)
-            if mask is not None:
-                mask = cv2.flip(mask, 1)
-                return img, mask
-        return img if mask is None else (img, mask)
-
-
-class RandomScale(object):
-    """Random scale transform."""
-    
-    def __init__(self, scale_range=(0.5, 2.0)):
-        self.scale_range = scale_range
-
-    def __call__(self, img, mask=None):
-        scale = random.uniform(*self.scale_range)
-        h, w = img.shape[:2]
-        new_h, new_w = int(h * scale), int(w * scale)
-        
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        if mask is not None:
-            mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-            return img, mask
-        return img
-
-
-class RandomCrop(object):
-    """Random crop transform."""
-    
-    def __init__(self, size, pad_value=0):
-        self.size = get_2dshape(size)
-        self.pad_value = pad_value
-
-    def __call__(self, img, mask=None):
-        crop_pos = generate_random_crop_pos(img.shape[:2], self.size)
-        img, _ = random_crop_pad_to_shape(img, crop_pos, self.size, self.pad_value)
-        
-        if mask is not None:
-            mask, _ = random_crop_pad_to_shape(mask, crop_pos, self.size, 255)
-            return img, mask
-        return img

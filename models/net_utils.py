@@ -6,7 +6,7 @@ Only used by geometry‐enhanced DFormer variants.
 import math
 import jittor as jt
 from jittor import nn
-from utils.jittor_utils import trunc_normal_
+from utils.dformer_utils import trunc_normal_
 
 # ------------------------------
 # Channel and Spatial weighting

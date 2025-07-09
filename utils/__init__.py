@@ -1,4 +1,4 @@
-from .jittor_utils import (
+from .dformer_utils import (
     trunc_normal_, DropPath, build_norm_layer, build_activation_layer,
     build_dropout, build_conv_layer, ConvModule, DepthwiseSeparableConvModule,
     BaseModule, FFN, load_state_dict, load_checkpoint, resize, Scale,

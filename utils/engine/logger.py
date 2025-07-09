@@ -77,7 +77,7 @@ class LogFormatter(logging.Formatter):
         return "\x1b[32m{}\x1b[0m".format(msg)
 
 
-def get_logger(log_dir=None, log_file=None, formatter=LogFormatter, level=_default_level, rank=0):
+def get_logger(log_dir=None, log_file=None, formatter=None, level=_default_level, rank=0):
     """Get logger instance."""
     logger = logging.getLogger()
     logger.handlers.clear()
@@ -92,7 +92,7 @@ def get_logger(log_dir=None, log_file=None, formatter=LogFormatter, level=_defau
         )
         ch = logging.StreamHandler(stream=sys.stdout)
         ch.setLevel(level)
-        ch.setFormatter(formatter if sys.stderr.isatty() else plain_formatter)
+        ch.setFormatter(plain_formatter)  # Always use plain formatter for now
         logger.addHandler(ch)
 
     # File handler

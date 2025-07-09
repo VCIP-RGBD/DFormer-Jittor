@@ -20,7 +20,6 @@ class WarmUpPolyLR(object):
         self.warmup_method = warmup_method
         self.last_epoch = last_epoch
         
-        # Store base learning rates
         if not isinstance(optimizer.param_groups, list):
             self.base_lrs = [optimizer.lr]
         else:
@@ -29,7 +28,6 @@ class WarmUpPolyLR(object):
     def get_lr(self):
         """Calculate learning rate for current epoch."""
         if self.last_epoch < self.warmup_iters:
-            # Warmup phase
             if self.warmup_method == 'constant':
                 warmup_factor = self.warmup_factor
             elif self.warmup_method == 'linear':
@@ -40,7 +38,6 @@ class WarmUpPolyLR(object):
             
             return [base_lr * warmup_factor for base_lr in self.base_lrs]
         else:
-            # Polynomial decay phase
             factor = (1 - (self.last_epoch - self.warmup_iters) / (self.max_iters - self.warmup_iters)) ** self.power
             return [base_lr * factor for base_lr in self.base_lrs]
 
@@ -52,12 +49,11 @@ class WarmUpPolyLR(object):
         
         lrs = self.get_lr()
         
-        # Update optimizer learning rates
-        if not isinstance(self.optimizer.param_groups, list):
-            self.optimizer.lr = lrs[0]
-        else:
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
+        elif hasattr(self.optimizer, 'lr'):
+            self.optimizer.lr = lrs[0]
 
 
 class PolyLR(object):
@@ -69,7 +65,6 @@ class PolyLR(object):
         self.power = power
         self.last_epoch = last_epoch
         
-        # Store base learning rates
         if not isinstance(optimizer.param_groups, list):
             self.base_lrs = [optimizer.lr]
         else:
@@ -88,12 +83,11 @@ class PolyLR(object):
         
         lrs = self.get_lr()
         
-        # Update optimizer learning rates
-        if not isinstance(self.optimizer.param_groups, list):
-            self.optimizer.lr = lrs[0]
-        else:
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
+        elif hasattr(self.optimizer, 'lr'):
+            self.optimizer.lr = lrs[0]
 
 
 class CosineAnnealingLR(object):
@@ -105,7 +99,6 @@ class CosineAnnealingLR(object):
         self.eta_min = eta_min
         self.last_epoch = last_epoch
         
-        # Store base learning rates
         if not isinstance(optimizer.param_groups, list):
             self.base_lrs = [optimizer.lr]
         else:
@@ -133,12 +126,11 @@ class CosineAnnealingLR(object):
         
         lrs = self.get_lr()
         
-        # Update optimizer learning rates
-        if not isinstance(self.optimizer.param_groups, list):
-            self.optimizer.lr = lrs[0]
-        else:
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
+        elif hasattr(self.optimizer, 'lr'):
+            self.optimizer.lr = lrs[0]
 
 
 class StepLR(object):
@@ -150,7 +142,6 @@ class StepLR(object):
         self.gamma = gamma
         self.last_epoch = last_epoch
         
-        # Store base learning rates
         if not isinstance(optimizer.param_groups, list):
             self.base_lrs = [optimizer.lr]
         else:
@@ -169,12 +160,11 @@ class StepLR(object):
         
         lrs = self.get_lr()
         
-        # Update optimizer learning rates
-        if not isinstance(self.optimizer.param_groups, list):
-            self.optimizer.lr = lrs[0]
-        else:
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
+        elif hasattr(self.optimizer, 'lr'):
+            self.optimizer.lr = lrs[0]
 
 
 class MultiStepLR(object):
@@ -186,7 +176,6 @@ class MultiStepLR(object):
         self.gamma = gamma
         self.last_epoch = last_epoch
         
-        # Store base learning rates
         if not isinstance(optimizer.param_groups, list):
             self.base_lrs = [optimizer.lr]
         else:
@@ -209,9 +198,8 @@ class MultiStepLR(object):
         
         lrs = self.get_lr()
         
-        # Update optimizer learning rates
-        if not isinstance(self.optimizer.param_groups, list):
-            self.optimizer.lr = lrs[0]
-        else:
+        if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
+        elif hasattr(self.optimizer, 'lr'):
+            self.optimizer.lr = lrs[0]

@@ -11,10 +11,20 @@ from typing import Dict, List, Optional, Union, Tuple
 
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    """Initialize tensor with truncated normal distribution."""
-    # TODO: Implement proper truncated normal initialization
-    # For now, use standard normal initialization
-    nn.init.gauss_(tensor, mean, std)
+    """Initialize tensor with truncated normal distribution.
+
+    Args:
+        tensor: Tensor to initialize
+        mean: Mean of the normal distribution
+        std: Standard deviation of the normal distribution
+        a: Lower bound for truncation
+        b: Upper bound for truncation
+    """
+    with jt.no_grad():
+        values = jt.randn_like(tensor) * std + mean
+        values = jt.clamp(values, a, b)
+        tensor.assign(values)
+
     return tensor
 
 
@@ -32,7 +42,7 @@ class DropPath(nn.Module):
         
         keep_prob = 1 - self.drop_prob
         random_tensor = keep_prob + jt.rand([x.shape[0]] + [1] * (x.ndim - 1), dtype=x.dtype)
-        random_tensor = random_tensor.floor()  # binarize
+        random_tensor = random_tensor.floor()
         
         if self.scale_by_keep:
             random_tensor = random_tensor / keep_prob
@@ -49,7 +59,7 @@ def build_norm_layer(norm_cfg, num_features):
     if norm_type in ['BN', 'BatchNorm2d']:
         return None, nn.BatchNorm2d(num_features)
     elif norm_type in ['SyncBN', 'SyncBatchNorm2d']:
-        return None, nn.BatchNorm2d(num_features)  # Jittor handles sync automatically
+        return None, nn.BatchNorm2d(num_features)
     elif norm_type in ['GN', 'GroupNorm']:
         num_groups = norm_cfg.get('num_groups', 32)
         return None, nn.GroupNorm(num_groups, num_features)
@@ -142,7 +152,6 @@ class ConvModule(nn.Module):
     ):
         super(ConvModule, self).__init__()
         
-        # Build conv layer
         self.conv = build_conv_layer(
             conv_cfg,
             in_channels,
@@ -155,10 +164,8 @@ class ConvModule(nn.Module):
             bias=bias
         )
         
-        # Build norm layer
         self.norm_name, self.norm = build_norm_layer(norm_cfg, out_channels)
         
-        # Build activation layer
         self.activate = build_activation_layer(act_cfg)
         
         self.order = order
@@ -195,7 +202,6 @@ class DepthwiseSeparableConvModule(nn.Module):
     ):
         super(DepthwiseSeparableConvModule, self).__init__()
         
-        # Depthwise convolution
         self.depthwise_conv = ConvModule(
             in_channels,
             in_channels,
@@ -209,7 +215,6 @@ class DepthwiseSeparableConvModule(nn.Module):
             bias=False
         )
         
-        # Pointwise convolution
         self.pointwise_conv = ConvModule(
             in_channels,
             out_channels,
@@ -235,11 +240,93 @@ class BaseModule(nn.Module):
         self._is_init = False
     
     def init_weights(self):
-        """Initialize weights."""
+        """Initialize weights based on configuration."""
         if self.init_cfg is not None:
-            # TODO: Implement weight initialization based on config
-            pass
+            if isinstance(self.init_cfg, dict):
+                self._init_weights_from_config(self.init_cfg)
+            elif isinstance(self.init_cfg, list):
+                for cfg in self.init_cfg:
+                    self._init_weights_from_config(cfg)
+        else:
+            self._default_init_weights()
         self._is_init = True
+
+    def _init_weights_from_config(self, cfg):
+        """Initialize weights from a single config."""
+        init_type = cfg.get('type', 'normal')
+
+        if init_type == 'normal':
+            mean = cfg.get('mean', 0.0)
+            std = cfg.get('std', 0.01)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        normal_init(m, mean, std, bias)
+
+        elif init_type == 'xavier':
+            gain = cfg.get('gain', 1.0)
+            bias = cfg.get('bias', 0.0)
+            distribution = cfg.get('distribution', 'normal')
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        xavier_init(m, gain, bias, distribution)
+
+        elif init_type == 'kaiming':
+            a = cfg.get('a', 0)
+            mode = cfg.get('mode', 'fan_out')
+            nonlinearity = cfg.get('nonlinearity', 'relu')
+            bias = cfg.get('bias', 0.0)
+            distribution = cfg.get('distribution', 'normal')
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        kaiming_init(m, a, mode, nonlinearity, bias, distribution)
+
+        elif init_type == 'constant':
+            val = cfg.get('val', 0.0)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        constant_init(m, val, bias)
+
+        elif init_type == 'trunc_normal':
+            mean = cfg.get('mean', 0.0)
+            std = cfg.get('std', 0.02)
+            a = cfg.get('a', -2.0)
+            b = cfg.get('b', 2.0)
+            bias = cfg.get('bias', 0.0)
+            layer = cfg.get('layer', None)
+
+            for m in self.modules():
+                if layer is None or isinstance(m, layer):
+                    if hasattr(m, 'weight') and m.weight is not None:
+                        trunc_normal_init(m, mean, std, a, b, bias)
+
+    def _default_init_weights(self):
+        """Default weight initialization."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                kaiming_init(m, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm, nn.LayerNorm)):
+                if hasattr(m, 'weight') and m.weight is not None:
+                    nn.init.constant_(m.weight, 1.0)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
 
 
 class FFN(nn.Module):
@@ -274,14 +361,12 @@ class FFN(nn.Module):
                 layers.append(nn.Dropout(ffn_drop))
             in_channels = feedforward_channels
         
-        # Final layer
         layers.append(nn.Linear(feedforward_channels, embed_dims))
         if ffn_drop > 0:
             layers.append(nn.Dropout(ffn_drop))
         
         self.layers = nn.Sequential(*layers)
         
-        # Dropout layer
         self.dropout_layer = build_dropout(dropout_layer)
     
     def execute(self, x, identity=None):
@@ -321,20 +406,116 @@ def load_state_dict(model, state_dict, strict=True):
 
 
 def load_checkpoint(model, filename, map_location=None, strict=False, logger=None):
-    """Load checkpoint from file."""
+    """Load checkpoint from file with comprehensive format support.
+
+    Args:
+        model: Jittor model to load weights into
+        filename: Path to checkpoint file
+        map_location: Device mapping (for compatibility, not used in Jittor)
+        strict: Whether to strictly enforce key matching
+        logger: Logger instance for reporting
+
+    Returns:
+        checkpoint: Loaded checkpoint dictionary
+    """
+    import os
+    import pickle
+
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"Checkpoint file not found: {filename}")
+
     try:
-        # TODO: Implement proper checkpoint loading for Jittor
-        checkpoint = jt.load(filename)
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
+        if filename.endswith('.pkl'):
+            try:
+                checkpoint = jt.load(filename)
+            except:
+                with open(filename, 'rb') as f:
+                    checkpoint = pickle.load(f)
+        elif filename.endswith('.pth') or filename.endswith('.pt'):
+            try:
+                import torch
+                checkpoint = torch.load(filename, map_location='cpu')
+                checkpoint = _convert_pytorch_checkpoint(checkpoint)
+            except ImportError:
+                with open(filename, 'rb') as f:
+                    checkpoint = pickle.load(f)
+        else:
+            with open(filename, 'rb') as f:
+                checkpoint = pickle.load(f)
+
+        if isinstance(checkpoint, dict):
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            elif 'model' in checkpoint:
+                state_dict = checkpoint['model']
+            elif 'state_dict_ema' in checkpoint:
+                state_dict = checkpoint['state_dict_ema']
+            else:
+                state_dict = checkpoint
         else:
             state_dict = checkpoint
-        
-        load_state_dict(model, state_dict, strict)
+
+        state_dict = _clean_state_dict_keys(state_dict)
+
+        missing_keys, unexpected_keys = load_state_dict(model, state_dict, strict=strict)
+
+        if logger:
+            logger.info(f"Loaded checkpoint from {filename}")
+            if missing_keys:
+                logger.info(f"Missing keys ({len(missing_keys)}): {missing_keys}")
+            if unexpected_keys:
+                logger.info(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys}")
+        else:
+            print(f"Loaded checkpoint from {filename}")
+            if missing_keys:
+                print(f"Missing keys ({len(missing_keys)}): {missing_keys}")
+            if unexpected_keys:
+                print(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys}")
+
         return checkpoint
+
     except Exception as e:
-        print(f"Failed to load checkpoint from {filename}: {e}")
-        return None
+        error_msg = f"Failed to load checkpoint from {filename}: {str(e)}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(f"Error: {error_msg}")
+        raise e
+
+
+def _convert_pytorch_checkpoint(checkpoint):
+    """Convert PyTorch checkpoint to Jittor-compatible format."""
+    if isinstance(checkpoint, dict):
+        converted = {}
+        for key, value in checkpoint.items():
+            if hasattr(value, 'detach'):
+                converted[key] = value.detach().cpu().numpy()
+            elif isinstance(value, dict):
+                converted[key] = _convert_pytorch_checkpoint(value)
+            else:
+                converted[key] = value
+        return converted
+    else:
+        return checkpoint
+
+
+def _clean_state_dict_keys(state_dict):
+    """Clean up state dict keys by removing common prefixes."""
+    if not isinstance(state_dict, dict):
+        return state_dict
+
+    prefixes_to_remove = ['module.', 'backbone.', 'encoder.', 'model.']
+
+    cleaned_state_dict = {}
+    for key, value in state_dict.items():
+        cleaned_key = key
+        for prefix in prefixes_to_remove:
+            if cleaned_key.startswith(prefix):
+                cleaned_key = cleaned_key[len(prefix):]
+                break
+        cleaned_state_dict[cleaned_key] = value
+
+    return cleaned_state_dict
 
 
 def resize(
@@ -408,5 +589,4 @@ def kaiming_init(module,
         nn.init.constant_(module.bias, bias)
 
 
-# Alias for compatibility
 trunc_normal_init = trunc_normal_ 

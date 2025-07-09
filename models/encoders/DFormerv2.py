@@ -18,10 +18,18 @@ from collections import OrderedDict
 
 
 def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    """Initialize tensor with truncated normal distribution."""
-    # TODO: Implement proper truncated normal initialization
-    nn.init.gauss_(tensor, mean, std)
-    return tensor
+    """Initialize tensor with truncated normal distribution.
+
+    Args:
+        tensor: Tensor to initialize
+        mean: Mean of the normal distribution
+        std: Standard deviation of the normal distribution
+        a: Lower bound for truncation
+        b: Upper bound for truncation
+    """
+    # Use the implementation from utils.dformer_utils
+    from utils.dformer_utils import trunc_normal_ as _trunc_normal_impl
+    return _trunc_normal_impl(tensor, mean, std, a, b)
 
 
 class DropPath(nn.Module):
@@ -37,11 +45,14 @@ class DropPath(nn.Module):
             return x
         
         keep_prob = 1 - self.drop_prob
-        random_tensor = keep_prob + jt.rand([x.shape[0]] + [1] * (x.ndim - 1), dtype=x.dtype)
-        random_tensor = random_tensor.floor()  # binarize
-        
+        shape = [x.shape[0]] + [1] * (x.ndim - 1)
+        random_tensor = jt.rand(shape, dtype=x.dtype)
+        keep_prob_tensor = jt.full_like(random_tensor, keep_prob)
+        random_tensor = jt.add(random_tensor, keep_prob_tensor)
+        random_tensor = jt.floor(random_tensor)  # binarize
+
         if self.scale_by_keep:
-            random_tensor = random_tensor / keep_prob
+            random_tensor = jt.divide(random_tensor, keep_prob_tensor)
         
         return x * random_tensor
 
@@ -113,18 +124,19 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
+        # Match PyTorch version exactly - use SyncBatchNorm (simulated with BatchNorm2d in Jittor)
         self.proj = nn.Sequential(
             nn.Conv2d(in_chans, embed_dim // 2, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim // 2),
+            nn.BatchNorm2d(embed_dim // 2),  # SyncBatchNorm in PyTorch
             nn.GELU(),
             nn.Conv2d(embed_dim // 2, embed_dim // 2, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim // 2),
+            nn.BatchNorm2d(embed_dim // 2),  # SyncBatchNorm in PyTorch
             nn.GELU(),
             nn.Conv2d(embed_dim // 2, embed_dim, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim),
+            nn.BatchNorm2d(embed_dim),       # SyncBatchNorm in PyTorch
             nn.GELU(),
             nn.Conv2d(embed_dim, embed_dim, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim),
+            nn.BatchNorm2d(embed_dim),       # SyncBatchNorm in PyTorch
         )
 
     def execute(self, x):
@@ -171,10 +183,20 @@ class PatchMerging(nn.Module):
 
 
 def angle_transform(x, sin, cos):
-    """Apply angle transformation for positional encoding."""
-    x1 = x[:, :, :, :, ::2]
-    x2 = x[:, :, :, :, 1::2]
-    return (x * cos) + (jt.stack([-x2, x1], dim=-1).flatten(-2) * sin)
+    """
+    x: [B, num_heads, H, W, C_head]
+    sin, cos: [B, H, W, C_head]
+    """
+    # Reshape sin and cos to broadcast correctly for multi-head attention
+    sin = sin.unsqueeze(1)  # -> [B, 1, H, W, C_head]
+    cos = cos.unsqueeze(1)  # -> [B, 1, H, W, C_head]
+
+    # Apply rotary angle transformation, matching PyTorch's implementation
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    rotated_x = jt.stack([-x2, x1], dim=-1).flatten(-2)  # flatten last two dims
+
+    return x * cos + rotated_x * sin
 
 
 class GeoPriorGen(nn.Module):
@@ -217,18 +239,31 @@ class GeoPriorGen(nn.Module):
 
     def generate_1d_depth_decay(self, H, W, depth_grid):
         """Generate 1d depth decay mask."""
+        B, C, H_grid, W_grid = depth_grid.shape
+        if C > 1:
+            depth_grid = depth_grid[:, 0:1, :, :]
+        
         mask = depth_grid[:, :, :, :, None] - depth_grid[:, :, :, None, :]
         mask = mask.abs()
-        mask = mask * self.decay[:, None, None, None]
-        return mask
+
+        num_heads = self.decay.shape[0]
+        decay_expanded = self.decay.reshape(1, num_heads, 1, 1, 1, 1)
+
+        mask = mask.unsqueeze(1).expand(B, num_heads, C, H_grid, W_grid, W_grid) * decay_expanded
+        return mask.squeeze(2)
+
 
     def generate_1d_decay(self, l):
         """Generate 1d decay mask."""
         index = jt.arange(l)
         mask = index[:, None] - index[None, :]
         mask = mask.abs()
-        mask = mask * self.decay[:, None, None]
-        return mask
+
+        num_heads = self.decay.shape[0]
+        decay_expanded = self.decay.reshape(1, num_heads, 1, 1)
+
+        mask = mask.unsqueeze(0).unsqueeze(0).expand(1, num_heads, l, l) * decay_expanded
+        return mask.squeeze(0)
 
     def execute(self, HW_tuple, depth_map, split_or_not=False):
         """
@@ -236,15 +271,18 @@ class GeoPriorGen(nn.Module):
         HW_tuple: (H, W)
         H * W == l
         """
+        B, C, H, W = depth_map.shape
         depth_map = F.interpolate(depth_map, size=HW_tuple, mode="bilinear", align_corners=False)
-
+        
+        # Match dimensions for sin/cos generation
+        index = jt.arange(HW_tuple[0] * HW_tuple[1])
+        sin = jt.sin(index[:, None] * self.angle[None, :]).reshape(HW_tuple[0], HW_tuple[1], -1)
+        cos = jt.cos(index[:, None] * self.angle[None, :]).reshape(HW_tuple[0], HW_tuple[1], -1)
+        # Expand to match batch size
+        sin = sin.unsqueeze(0).expand(B, -1, -1, -1)
+        cos = cos.unsqueeze(0).expand(B, -1, -1, -1)
+        
         if split_or_not:
-            index = jt.arange(HW_tuple[0] * HW_tuple[1])
-            sin = jt.sin(index[:, None] * self.angle[None, :])
-            sin = sin.reshape(HW_tuple[0], HW_tuple[1], -1)
-            cos = jt.cos(index[:, None] * self.angle[None, :])
-            cos = cos.reshape(HW_tuple[0], HW_tuple[1], -1)
-
             mask_d_h = self.generate_1d_depth_decay(HW_tuple[0], HW_tuple[1], depth_map.transpose(-2, -1))
             mask_d_w = self.generate_1d_depth_decay(HW_tuple[1], HW_tuple[0], depth_map)
 
@@ -257,10 +295,6 @@ class GeoPriorGen(nn.Module):
             geo_prior = ((sin, cos), (mask_h, mask_w))
 
         else:
-            index = jt.arange(HW_tuple[0] * HW_tuple[1])
-            sin = jt.sin(index[:, None] * self.angle[None, :])
-            cos = jt.cos(index[:, None] * self.angle[None, :])
-
             mask_d = self.generate_depth_decay(HW_tuple[0], HW_tuple[1], depth_map)
             mask_p = self.generate_pos_decay(HW_tuple[0], HW_tuple[1])
 
@@ -275,15 +309,22 @@ class Decomposed_GSA(nn.Module):
 
     def __init__(self, embed_dim, num_heads, value_factor=1):
         super().__init__()
+        self.factor = value_factor
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.value_factor = value_factor
+        self.head_dim = self.embed_dim * self.factor // num_heads
+        self.key_dim = self.embed_dim // num_heads
+        self.scaling = self.key_dim ** -0.5
 
-        self.to_q = nn.Linear(embed_dim, embed_dim)
-        self.to_k = nn.Linear(embed_dim, embed_dim)
-        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor)
-        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim)
+        self.to_q = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.to_k = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
+        
+        # Add LEPE (Learned Position Encoding) - critical component from PyTorch version
+        self.lepe = DWConv2d(embed_dim * value_factor, 5, 1, 2)
+        
+        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
+        self.reset_parameters()
 
     def execute(self, x, rel_pos, split_or_not=False):
         """
@@ -294,47 +335,67 @@ class Decomposed_GSA(nn.Module):
         q = self.to_q(x)
         k = self.to_k(x)
         v = self.to_v(x)
+        
+        lepe = self.lepe(v)
 
         if split_or_not:
-            # Decomposed attention for efficiency
-            ((sin_h, cos_h), (mask_h, mask_w)) = rel_pos
+            # Decomposed attention
+            ((sin, cos), (mask_h, mask_w)) = rel_pos
             
-            # Split into height and width dimensions
-            q_h = q.reshape(B, H, W, self.num_heads, self.head_dim).permute(0, 3, 1, 2, 4)
-            k_h = k.reshape(B, H, W, self.num_heads, self.head_dim).permute(0, 3, 1, 2, 4)
-            v_h = v.reshape(B, H, W, self.num_heads, self.head_dim * self.value_factor).permute(0, 3, 1, 2, 4)
+            k = k * self.scaling
             
-            # Height-wise attention
-            scale = self.head_dim ** -0.5
-            attn_h = (q_h @ k_h.transpose(-2, -1)) * scale
-            attn_h = attn_h + mask_h
-            attn_h = F.softmax(attn_h, dim=-1)
+            q = q.view(B, H, W, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4)
+            k = k.view(B, H, W, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4)
             
-            out_h = attn_h @ v_h
-            out = out_h.permute(0, 2, 3, 1, 4).reshape(B, H, W, C * self.value_factor)
-            out = self.to_out(out)
+            qr = angle_transform(q, sin, cos)
+            kr = angle_transform(k, sin, cos)
+            
+            qr_w = qr.transpose(1, 2)
+            kr_w = kr.transpose(1, 2)
+            v_reshaped = v.reshape(B, H, W, self.num_heads, -1).permute(0, 1, 3, 2, 4)
+            
+            qk_mat_w = qr_w @ kr_w.transpose(-1, -2)
+            qk_mat_w = qk_mat_w + mask_w.transpose(1, 2)
+            qk_mat_w = F.softmax(qk_mat_w, dim=-1)
+            v_reshaped = jt.matmul(qk_mat_w, v_reshaped)
+            
+            qr_h = qr.permute(0, 3, 1, 2, 4)
+            kr_h = kr.permute(0, 3, 1, 2, 4)
+            v_reshaped = v_reshaped.permute(0, 3, 2, 1, 4)
+            
+            qk_mat_h = qr_h @ kr_h.transpose(-1, -2)
+            qk_mat_h = qk_mat_h + mask_h.transpose(1, 2)
+            qk_mat_h = F.softmax(qk_mat_h, dim=-1)
+            output = jt.matmul(qk_mat_h, v_reshaped)
+            
+            output = output.permute(0, 3, 1, 2, 4).reshape(B, H, W, -1)
         else:
+            # Full attention
             (sin, cos), mask = rel_pos
-            q = q.reshape(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-            k = k.reshape(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-            v = v.reshape(B, H * W, self.num_heads, self.head_dim * self.value_factor).permute(0, 2, 1, 3)
+            k = k * self.scaling
+            
+            q_reshaped = q.view(B, H, W, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4)
+            k_reshaped = k.view(B, H, W, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4)
+            
+            # Use angle_transform directly
+            qr = angle_transform(q_reshaped, sin, cos)
+            kr = angle_transform(k_reshaped, sin, cos)
+            
+            qr = qr.flatten(2, 3)
+            kr = kr.flatten(2, 3)
+            vr = v.reshape(B, H, W, self.num_heads, -1).permute(0, 3, 1, 2, 4).flatten(2, 3)
+            
+            qk_mat = qr @ kr.transpose(-2, -1)
+            qk_mat = qk_mat + mask
+            qk_mat = F.softmax(qk_mat, dim=-1)
+            output = jt.matmul(qk_mat, vr)
+            
+            output = output.transpose(1, 2).reshape(B, H, W, -1)
 
-            # Apply rotary positional encoding
-            q = q * cos + jt.stack([-q[:, :, :, 1::2], q[:, :, :, ::2]], dim=-1).flatten(-2) * sin
-            k = k * cos + jt.stack([-k[:, :, :, 1::2], k[:, :, :, ::2]], dim=-1).flatten(-2) * sin
-
-            # Compute attention
-            scale = self.head_dim ** -0.5
-            attn = (q @ k.transpose(-2, -1)) * scale
-            attn = attn + mask
-            attn = F.softmax(attn, dim=-1)
-
-            out = attn @ v
-            out = out.permute(0, 2, 1, 3).reshape(B, H, W, C * self.value_factor)
-            out = self.to_out(out)
-
-        return out
-
+        output = output + lepe
+        output = self.to_out(output)
+        return output
+    
     def reset_parameters(self):
         """Reset parameters."""
         for m in self.modules():
@@ -349,15 +410,22 @@ class Full_GSA(nn.Module):
 
     def __init__(self, embed_dim, num_heads, value_factor=1):
         super().__init__()
+        self.factor = value_factor
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.value_factor = value_factor
+        self.head_dim = self.embed_dim * self.factor // num_heads
+        self.key_dim = self.embed_dim // num_heads
+        self.scaling = self.key_dim ** -0.5
 
-        self.to_q = nn.Linear(embed_dim, embed_dim)
-        self.to_k = nn.Linear(embed_dim, embed_dim)
-        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor)
-        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim)
+        self.to_q = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.to_k = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
+        
+        # Add LEPE (Learned Position Encoding) - critical component from PyTorch version
+        self.lepe = DWConv2d(embed_dim * value_factor, 5, 1, 2)
+        
+        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
+        self.reset_parameters()
 
     def execute(self, x, rel_pos, split_or_not=False):
         """
@@ -368,28 +436,43 @@ class Full_GSA(nn.Module):
         q = self.to_q(x)
         k = self.to_k(x)
         v = self.to_v(x)
+        
+        # Apply LEPE to values
+        lepe = self.lepe(v)
 
         (sin, cos), mask = rel_pos
-        q = q.reshape(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        k = k.reshape(B, H * W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = v.reshape(B, H * W, self.num_heads, self.head_dim * self.value_factor).permute(0, 2, 1, 3)
-
-        # Apply rotary positional encoding
-        q = q * cos + jt.stack([-q[:, :, :, 1::2], q[:, :, :, ::2]], dim=-1).flatten(-2) * sin
-        k = k * cos + jt.stack([-k[:, :, :, 1::2], k[:, :, :, ::2]], dim=-1).flatten(-2) * sin
-
+        assert H * W == mask.shape[3]
+        
+        # Apply scaling to k
+        k = k * self.scaling
+        
+        # Reshape for multi-head attention - following PyTorch exactly
+        q_reshaped = q.view(B, H, W, self.num_heads, -1).permute(0, 3, 1, 2, 4)  # (B, num_heads, H, W, key_dim)
+        k_reshaped = k.view(B, H, W, self.num_heads, -1).permute(0, 3, 1, 2, 4)  # (B, num_heads, H, W, key_dim)
+        
+        # Apply rotary position encoding
+        qr = angle_transform(q_reshaped, sin, cos)
+        kr = angle_transform(k_reshaped, sin, cos)
+        
+        # Flatten spatial dimensions
+        qr = qr.flatten(2, 3)  # (B, num_heads, H*W, key_dim)
+        kr = kr.flatten(2, 3)  # (B, num_heads, H*W, key_dim)
+        vr = v.reshape(B, H, W, self.num_heads, -1).permute(0, 3, 1, 2, 4).flatten(2, 3)  # (B, num_heads, H*W, head_dim)
+        
         # Compute attention
-        scale = self.head_dim ** -0.5
-        attn = (q @ k.transpose(-2, -1)) * scale
-        attn = attn + mask
-        attn = F.softmax(attn, dim=-1)
-
-        out = attn @ v
-        out = out.permute(0, 2, 1, 3).reshape(B, H, W, C * self.value_factor)
-        out = self.to_out(out)
-
-        return out
-
+        qk_mat = qr @ kr.transpose(-2, -1)
+        qk_mat = qk_mat + mask
+        qk_mat = F.softmax(qk_mat, dim=-1)
+        output = jt.matmul(qk_mat, vr)
+        
+        # Reshape back
+        output = output.transpose(1, 2).reshape(B, H, W, -1)  # (B, H, W, embed_dim*factor)
+        
+        # Add LEPE and apply output projection
+        output = output + lepe
+        output = self.to_out(output)
+        return output
+    
     def reset_parameters(self):
         """Reset parameters."""
         for m in self.modules():
@@ -486,16 +569,24 @@ class RGBD_Block(nn.Module):
         self.ffn_dim = ffn_dim
         self.layerscale = layerscale
 
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+
+        # Geometry prior generator
         self.geo_prior_gen = GeoPriorGen(embed_dim, num_heads, init_value, heads_range)
         
+        # Attention module
         if split_or_not:
             self.attn = Decomposed_GSA(embed_dim, num_heads)
         else:
             self.attn = Full_GSA(embed_dim, num_heads)
 
+        # Feed forward network
         self.ffn = FeedForwardNetwork(embed_dim, ffn_dim)
-        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+        
+        # CNN positional encoding - critical component from PyTorch version
+        self.cnn_pos_encode = DWConv2d(embed_dim, 3, 1, 1)
 
         # Implement DropPath
         if drop_path > 0:
@@ -503,37 +594,32 @@ class RGBD_Block(nn.Module):
         else:
             self.drop_path = nn.Identity()
 
+        # Layer scale parameters
         if layerscale:
-            self.gamma1 = jt.full((embed_dim,), layer_init_values)
-            self.gamma2 = jt.full((embed_dim,), layer_init_values)
+            self.gamma1 = jt.full((1, 1, 1, embed_dim), layer_init_values)
+            self.gamma2 = jt.full((1, 1, 1, embed_dim), layer_init_values)
 
     def execute(self, x, x_e, split_or_not=False):
         """
         x: RGB features [B, H, W, C]
-        x_e: Depth features [B, H, W, C]
+        x_e: Depth features [B, C_in, H_in, W_in]
         """
-        # Generate geometry prior
+        # Apply CNN positional encoding - this is critical from PyTorch version
+        x = x + self.cnn_pos_encode(x)
+        
         B, H, W, C = x.shape
-        depth_map = x_e.permute(0, 3, 1, 2)  # Convert to BCHW
+        depth_map = x_e # x_e is already in BCHW format
         geo_prior = self.geo_prior_gen((H, W), depth_map, split_or_not)
 
-        # Self-attention
-        shortcut = x
-        x = self.norm1(x)
-        x = self.attn(x, geo_prior, split_or_not)
+        # Self-attention with layer scale
         if self.layerscale:
-            x = self.gamma1 * x
-        x = shortcut + self.drop_path(x)
+            x = x + self.drop_path(self.gamma1 * self.attn(self.norm1(x), geo_prior, split_or_not))
+            x = x + self.drop_path(self.gamma2 * self.ffn(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.attn(self.norm1(x), geo_prior, split_or_not))
+            x = x + self.drop_path(self.ffn(self.norm2(x)))
 
-        # Feed forward
-        shortcut = x
-        x = self.norm2(x)
-        x = self.ffn(x)
-        if self.layerscale:
-            x = self.gamma2 * x
-        x = shortcut + self.drop_path(x)
-
-        return x, x_e
+        return x # Return only x, not x_e
 
 
 class BasicLayer(nn.Module):
@@ -560,6 +646,7 @@ class BasicLayer(nn.Module):
         self.embed_dim = embed_dim
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.split_or_not = split_or_not
 
         # Build blocks
         self.blocks = nn.ModuleList([
@@ -567,7 +654,7 @@ class BasicLayer(nn.Module):
                 split_or_not=split_or_not,
                 embed_dim=embed_dim,
                 num_heads=num_heads,
-                ffn_dim=int(embed_dim * ffn_dim),
+                ffn_dim=int(embed_dim * ffn_dim) if isinstance(ffn_dim, float) else ffn_dim,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 layerscale=layerscale,
                 layer_init_values=layer_init_values,
@@ -585,18 +672,18 @@ class BasicLayer(nn.Module):
 
     def execute(self, x, x_e):
         """
-        x: RGB features
-        x_e: Depth features
+        x: RGB features [B, H, W, C]
+        x_e: Depth features [B, 1, H, W]
         """
+        # Process through all blocks with depth features
         for block in self.blocks:
-            x, x_e = block(x, x_e)
+            x = block(x, x_e, split_or_not=self.split_or_not)
 
         if self.downsample is not None:
             x_down = self.downsample(x)
-            x_e_down = self.downsample(x_e)
-            return x, x_down, x_e, x_e_down
+            return x, x_down
         else:
-            return x, x, x_e, x_e
+            return x, x
 
 
 class dformerv2(nn.Module):
@@ -629,12 +716,12 @@ class dformerv2(nn.Module):
         self.drop_path_rate = drop_path_rate
         self.norm_eval = norm_eval
 
-        # Patch embedding
+        # Patch embedding - only for RGB, depth is processed differently
         self.patch_embed = PatchEmbed(in_chans=3, embed_dim=embed_dims[0])
-        self.patch_embed_e = PatchEmbed(in_chans=1, embed_dim=embed_dims[0])
+        # Note: PyTorch version doesn't use separate depth patch embedding
 
         # Calculate drop path rates
-        dpr = [x.item() for x in jt.linspace(0, drop_path_rate, sum(depths))]
+        dpr = jt.linspace(0, drop_path_rate, sum(depths)).tolist()
 
         # Build layers
         self.layers = nn.ModuleList()
@@ -656,8 +743,13 @@ class dformerv2(nn.Module):
             )
             self.layers.append(layer)
 
-        # Layer normalization
-        self.norm = LayerNorm2d(embed_dims[-1])
+        # Add extra normalization layers - critical component from PyTorch version
+        self.extra_norms = nn.ModuleList()
+        for i in range(3):  # For layers 1, 2, 3 (skip layer 0)
+            self.extra_norms.append(nn.LayerNorm(embed_dims[i + 1]))
+
+        # Apply weight initialization
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         """Initialize weights."""
@@ -673,10 +765,15 @@ class dformerv2(nn.Module):
         """Initialize model weights."""
         if pretrained is not None:
             try:
+                # Import load_checkpoint from utils
+                from utils.dformer_utils import load_checkpoint
+
                 checkpoint = load_checkpoint(self, pretrained, strict=False)
-                print(f"Loaded checkpoint from {pretrained}")
+                print(f"Successfully loaded checkpoint from {pretrained}")
             except Exception as e:
                 print(f"Failed to load checkpoint: {e}")
+                # Fall back to default initialization
+                self.apply(self._init_weights)
         else:
             self.apply(self._init_weights)
 
@@ -693,23 +790,27 @@ class dformerv2(nn.Module):
         x: RGB input [B, 3, H, W]
         x_e: Depth input [B, 1, H, W]
         """
-        # Patch embedding
+        # RGB patch embedding
         x = self.patch_embed(x)  # [B, H/4, W/4, C]
-        x_e = self.patch_embed_e(x_e)  # [B, H/4, W/4, C]
+        
+        # Depth input processing - extract first channel and keep single channel
+        x_e = x_e[:, 0, :, :].unsqueeze(1)  # [B, 1, H, W] - keep single channel like PyTorch
 
         outs = []
-        for i, layer in enumerate(self.layers):
-            if layer.downsample is not None:
-                x_out, x, x_e_out, x_e = layer(x, x_e)
-            else:
-                x_out, x, x_e_out, x_e = layer(x, x_e)
-
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            x_out, x = layer(x, x_e)
+            
             if i in self.out_indices:
+                # Apply extra normalization for layers 1, 2, 3 (skip layer 0)
+                if i != 0:
+                    x_out = self.extra_norms[i - 1](x_out)
+                
                 # Convert back to BCHW format
-                x_out = x_out.permute(0, 3, 1, 2)
-                outs.append(x_out)
+                out = x_out.permute(0, 3, 1, 2)
+                outs.append(out)
 
-        return outs
+        return tuple(outs)
 
     def train(self, mode=True):
         """Set training mode."""
@@ -724,7 +825,7 @@ def DFormerv2_S(pretrained=False, **kwargs):
     """DFormerv2 Small model."""
     model = dformerv2(
         embed_dims=[64, 128, 256, 512],
-        depths=[2, 2, 8, 2],
+        depths=[3, 4, 18, 4],  # Fixed to match PyTorch version (was [2, 2, 8, 2])
         num_heads=[4, 4, 8, 16],
         init_values=[2, 2, 2, 2],
         heads_ranges=[4, 4, 6, 6],
@@ -740,11 +841,13 @@ def DFormerv2_B(pretrained=False, **kwargs):
     """DFormerv2 Base model."""
     model = dformerv2(
         embed_dims=[80, 160, 320, 512],
-        depths=[2, 2, 18, 2],
+        depths=[4, 8, 25, 8],  # Fixed to match PyTorch version
         num_heads=[5, 5, 10, 16],
         init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
+        heads_ranges=[5, 5, 6, 6],  # Fixed to match PyTorch version
         mlp_ratios=[4, 4, 3, 3],
+        layerscales=[False, False, True, True],  # Added from PyTorch version
+        layer_init_values=1e-6,
         **kwargs
     )
     if pretrained:
@@ -756,11 +859,13 @@ def DFormerv2_L(pretrained=False, **kwargs):
     """DFormerv2 Large model."""
     model = dformerv2(
         embed_dims=[112, 224, 448, 640],
-        depths=[2, 2, 18, 2],
+        depths=[4, 8, 25, 8],  # Fixed to match PyTorch version
         num_heads=[7, 7, 14, 20],
         init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
+        heads_ranges=[6, 6, 6, 6],  # Fixed to match PyTorch version
         mlp_ratios=[4, 4, 3, 3],
+        layerscales=[False, False, True, True],  # Added from PyTorch version
+        layer_init_values=1e-6,
         **kwargs
     )
     if pretrained:

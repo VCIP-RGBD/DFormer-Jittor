@@ -145,13 +145,13 @@ class EncoderDecoder(nn.Module):
         """Execute function."""
         # Get prediction
         pred = self.encode_decode(rgb, modal_x)
-        
+
         if self.training and label is not None:
             # Compute loss
             loss = self.criterion(pred, label)
-            
+
             # Auxiliary loss
-            if self.aux_head is not None:
+            if hasattr(self, 'aux_head') and self.aux_head is not None:
                 aux_features = self.backbone(rgb, modal_x)
                 if isinstance(aux_features, tuple) and len(aux_features) == 2:
                     aux_features = aux_features[0]
@@ -159,10 +159,14 @@ class EncoderDecoder(nn.Module):
                 aux_pred = F.interpolate(aux_pred, size=rgb.shape[2:], mode='bilinear', align_corners=False)
                 aux_loss = self.criterion(aux_pred, label)
                 loss = loss + self.aux_rate * aux_loss
-            
-            return loss
+
+            return [pred], loss
         else:
-            return pred
+            return [pred], None
+
+    def forward(self, rgb, modal_x=None, label=None):
+        """Forward function for compatibility."""
+        return self.execute(rgb, modal_x, label)
 
 
 class Config:

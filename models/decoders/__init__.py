@@ -4,7 +4,7 @@ Decoder modules for DFormer Jittor implementation.
 
 from .ham_head import LightHamHead
 from .MLPDecoder import MLPDecoder, DecoderHead as MLPDecoderHead
-from .decode_head import DecoderHead
+from .decode_head import BaseDecodeHead as DecoderHead
 from .fcnhead import FCNHead
 from .LMLPDecoder import DecoderHead as LMLPDecoderHead
 from .UPernet import UPerHead
