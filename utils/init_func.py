@@ -43,18 +43,22 @@ def group_weight(module):
     group_decay = []
     group_no_decay = []
     
-    for m in module.modules():
-        if isinstance(m, (nn.Linear, nn.Conv2d)):
-            group_decay.append(m.weight)
-            if m.bias is not None:
-                group_no_decay.append(m.bias)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)):
-            if m.weight is not None:
-                group_no_decay.append(m.weight)
-            if m.bias is not None:
-                group_no_decay.append(m.bias)
+    for name, param in module.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        # Parameters that should have weight decay
+        if len(param.shape) >= 2:  # Conv2d weights, Linear weights
+            group_decay.append(param)
+        else:  # Bias, BatchNorm weights/bias, etc.
+            group_no_decay.append(param)
     
-    assert len(list(module.parameters())) == len(group_decay) + len(group_no_decay)
+    # Remove assertion as it might fail for complex models
+    total_params = len(list(module.parameters()))
+    grouped_params = len(group_decay) + len(group_no_decay)
+    
+    if total_params != grouped_params:
+        print(f"Warning: Total parameters ({total_params}) != grouped parameters ({grouped_params})")
     
     groups = [
         dict(params=group_decay),

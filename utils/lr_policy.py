@@ -20,10 +20,11 @@ class WarmUpPolyLR(object):
         self.warmup_method = warmup_method
         self.last_epoch = last_epoch
         
-        if not isinstance(optimizer.param_groups, list):
-            self.base_lrs = [optimizer.lr]
+        # Handle different optimizer structures
+        if hasattr(optimizer, 'param_groups') and optimizer.param_groups:
+            self.base_lrs = [group.get('lr', optimizer.lr) for group in optimizer.param_groups]
         else:
-            self.base_lrs = [group['lr'] for group in optimizer.param_groups]
+            self.base_lrs = [optimizer.lr]
 
     def get_lr(self):
         """Calculate learning rate for current epoch."""
@@ -52,7 +53,7 @@ class WarmUpPolyLR(object):
         if hasattr(self.optimizer, 'param_groups') and self.optimizer.param_groups:
             for param_group, lr in zip(self.optimizer.param_groups, lrs):
                 param_group['lr'] = lr
-        elif hasattr(self.optimizer, 'lr'):
+        else:
             self.optimizer.lr = lrs[0]
 
 

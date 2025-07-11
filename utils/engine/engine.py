@@ -135,6 +135,58 @@ class Engine(object):
         """Link tensorboard directory."""
         link_file(source, target)
 
+    def save_and_link_checkpoint(self, checkpoint_dir, log_dir, log_dir_link, infor="", metric=None):
+        """Save checkpoint and create link."""
+        assert metric is not None
+        ensure_dir(checkpoint_dir)
+        if not osp.exists(log_dir_link):
+            link_file(log_dir, log_dir_link)
+        self.checkpoint_state.append({"epoch": self.state.epoch, "metric": metric})
+        self.checkpoint_state.sort(key=lambda x: x["metric"], reverse=True)
+        if len(self.checkpoint_state) > 5:
+            try:
+                os.remove(
+                    osp.join(
+                        checkpoint_dir,
+                        f"epoch-{self.checkpoint_state[-1]['epoch']}_miou_{self.checkpoint_state[-1]['metric']}.pth",
+                    )
+                )
+                logger.info(f"remove inferior checkpoint: {self.checkpoint_state[-1]}")
+            except:
+                pass
+            self.checkpoint_state.pop()
+        checkpoint = osp.join(checkpoint_dir, f"epoch-{self.state.epoch}{infor}.pth")
+        self.save_checkpoint(checkpoint)
+
+    def restore_checkpoint(self):
+        """Restore checkpoint from file."""
+        if self.continue_state_object is None:
+            return
+            
+        t_start = time.time()
+        if self.distributed:
+            # For distributed training, load on CPU first
+            tmp = jt.load(self.continue_state_object)
+        else:
+            tmp = jt.load(self.continue_state_object)
+        t_ioend = time.time()
+        
+        if 'model' in tmp:
+            self.state.model = load_model(self.state.model, tmp["model"], is_restore=True)
+        if 'optimizer' in tmp:
+            self.state.optimizer.load_state_dict(tmp["optimizer"])
+        if 'epoch' in tmp:
+            self.state.epoch = tmp["epoch"] + 1
+        if 'iteration' in tmp:
+            self.state.iteration = tmp["iteration"]
+        del tmp
+        t_end = time.time()
+        logger.info(
+            "Load checkpoint from file {}, Time usage:\n\tIO: {}, restore checkpoint: {}".format(
+                self.continue_state_object, t_ioend - t_start, t_end - t_ioend
+            )
+        )
+
     def __enter__(self):
         return self
 

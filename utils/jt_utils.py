@@ -99,7 +99,8 @@ def save_model(model, model_file):
 
 def all_reduce_tensor(tensor, op=None, world_size=1):
     """All reduce tensor across processes."""
-    # For single GPU, just return the tensor
+    if jt.world_size > 1:
+        return jt.distributed.all_reduce(tensor)
     return tensor
 
 
