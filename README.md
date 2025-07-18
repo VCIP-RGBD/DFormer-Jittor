@@ -185,6 +185,31 @@ python benchmark.py --config local_configs.NYUDepthv2.DFormer_Base
 ```bash
 python utils/latency.py --config local_configs.NYUDepthv2.DFormer_Base
 ```
+## ⚠️ Note
+
+### Root Cause of the Issue
+
+**What is CUTLASS?**  
+CUTLASS (CUDA Templates for Linear Algebra Subroutines) is a high-performance CUDA matrix operation template library launched by NVIDIA, primarily used for efficiently implementing core operators like GEMM/Conv on Tensor Cores. It is utilized by many frameworks (Jittor, PyTorch XLA, TVM, etc.) for custom operators or as a low-level acceleration for Auto-Tuning.
+
+**Why does Jittor pull CUTLASS in cuDNN unit tests?**  
+When Jittor loads/compiles external CUDA libraries, it automatically compiles several custom operators from CUTLASS (setup_cutlass()). If the local cache is missing, it will call install_cutlass() to download and extract a cutlass.zip.
+
+### Direct Cause of the Crash
+
+The install_cutlass() function in version 1.3.9.14 uses a download link that has become invalid (confirmed by community Issue #642).  
+After the download fails, a partial ~/.cache/jittor/cutlass directory is left behind; when running the function again, it attempts to execute shutil.rmtree('.../cutlass/cutlass'), but this subdirectory does not exist, triggering a FileNotFoundError and ultimately causing the main process to core dump.
+
+### Solutions (Choose one, in recommended order)
+
+| 方案                      | 操作步骤                                                                                                                                                                                                                                                                                                                    | 适用场景                            |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| **1️⃣ 临时跳过 CUTLASS**    | `bash\n# 仅对当前 shell 生效\nexport use_cutlass=0\npython3.8 -m jittor.test.test_cudnn_op\n`                                                                                                                                                                                                                                 | 只想先跑通 cuDNN 单测 / 不需要 CUTLASS 算子 |
+| **2️⃣ 手动安装 CUTLASS**    | `bash\n# 清理残留\nrm -rf ~/.cache/jittor/cutlass\n\n# 手动克隆最新版\nmkdir -p ~/.cache/jittor/cutlass && \\\ncd ~/.cache/jittor/cutlass && \\\ngit clone --depth 1 https://github.com/NVIDIA/cutlass.git cutlass\n\n# 再次运行\npython3.8 -m jittor.test.test_cudnn_op\n` | 仍想保留 CUTLASS 相关算子功能             |
+| **3️⃣ 升级 Jittor 至修复版本** | `bash\npip install -U jittor jittor-utils\n`社区 1.3.9.15+ 已把失效链接改到镜像源，升级后即可自动重新下载。                                                                                                                                                                                                                                       | 允许升级环境并希望后续自动管理                 |
+
+
+
 
 ## 🤝 Contributing
 

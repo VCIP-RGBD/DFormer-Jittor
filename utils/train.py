@@ -52,14 +52,14 @@ class GpuTimer:
         self.first_call = True
 
     def start(self):
-        jt.sync_all(True)
+        # Remove unnecessary sync for performance
         self.start_time = time.perf_counter()
 
     def stop(self):
         if self.start_time is None:
             print("Use start() before stop(). ")
             return
-        jt.sync_all(True)
+        jt.sync_all(True)  # Keep sync only at stop for accurate timing
         self.stop_time = time.perf_counter()
         elapsed = self.stop_time - self.start_time
         self.start_time = None
@@ -107,6 +107,11 @@ def main():
     parser.add_argument("--local-rank", default=0, type=int)
 
     args = parser.parse_args()
+    
+    # Set Jittor optimization flags for better GPU utilization
+    jt.flags.use_cuda = 1
+    jt.flags.lazy_execution = 1
+    jt.flags.use_stat_allocator = 1
     
     config = getattr(import_module(args.config), "C")
     

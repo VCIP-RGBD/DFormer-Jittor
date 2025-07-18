@@ -3,13 +3,13 @@
 # DFormer Jittor Training Script
 # Adapted from PyTorch version for Jittor framework
 
-GPUS=2
+GPUS=1
 NNODES=1
 NODE_RANK=${NODE_RANK:-0}
 PORT=${PORT:-29158}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 
-export CUDA_VISIBLE_DEVICES="0,1"
+export CUDA_VISIBLE_DEVICES="0"
 
 # For single GPU testing, use GPUS=1 and CUDA_VISIBLE_DEVICES="0"
 # GPUS=1
