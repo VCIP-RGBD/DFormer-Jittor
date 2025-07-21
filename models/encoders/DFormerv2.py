@@ -124,19 +124,19 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        # Match PyTorch version exactly - use SyncBatchNorm (simulated with BatchNorm2d in Jittor)
+        # Use simple approach to avoid initialization issues
         self.proj = nn.Sequential(
             nn.Conv2d(in_chans, embed_dim // 2, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim // 2),  # SyncBatchNorm in PyTorch
+            nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
             nn.Conv2d(embed_dim // 2, embed_dim // 2, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim // 2),  # SyncBatchNorm in PyTorch
+            nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
             nn.Conv2d(embed_dim // 2, embed_dim, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim),       # SyncBatchNorm in PyTorch
+            nn.BatchNorm2d(embed_dim),
             nn.GELU(),
             nn.Conv2d(embed_dim, embed_dim, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim),       # SyncBatchNorm in PyTorch
+            nn.BatchNorm2d(embed_dim),
         )
 
     def execute(self, x):
@@ -316,14 +316,14 @@ class Decomposed_GSA(nn.Module):
         self.key_dim = self.embed_dim // num_heads
         self.scaling = self.key_dim ** -0.5
 
-        self.to_q = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.to_k = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
         
         # Add LEPE (Learned Position Encoding) - critical component from PyTorch version
         self.lepe = DWConv2d(embed_dim * value_factor, 5, 1, 2)
         
-        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
         self.reset_parameters()
 
     def execute(self, x, rel_pos, split_or_not=False):
@@ -332,9 +332,9 @@ class Decomposed_GSA(nn.Module):
         rel_pos: relative position encoding
         """
         B, H, W, C = x.shape
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
         
         lepe = self.lepe(v)
 
@@ -393,7 +393,7 @@ class Decomposed_GSA(nn.Module):
             output = output.transpose(1, 2).reshape(B, H, W, -1)
 
         output = output + lepe
-        output = self.to_out(output)
+        output = self.out_proj(output)
         return output
     
     def reset_parameters(self):
@@ -417,14 +417,14 @@ class Full_GSA(nn.Module):
         self.key_dim = self.embed_dim // num_heads
         self.scaling = self.key_dim ** -0.5
 
-        self.to_q = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.to_k = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.to_v = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim * value_factor, bias=True)
         
         # Add LEPE (Learned Position Encoding) - critical component from PyTorch version
         self.lepe = DWConv2d(embed_dim * value_factor, 5, 1, 2)
         
-        self.to_out = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim * value_factor, embed_dim, bias=True)
         self.reset_parameters()
 
     def execute(self, x, rel_pos, split_or_not=False):
@@ -433,9 +433,9 @@ class Full_GSA(nn.Module):
         rel_pos: relative position encoding
         """
         B, H, W, C = x.shape
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
         
         # Apply LEPE to values
         lepe = self.lepe(v)
@@ -470,7 +470,7 @@ class Full_GSA(nn.Module):
         
         # Add LEPE and apply output projection
         output = output + lepe
-        output = self.to_out(output)
+        output = self.out_proj(output)
         return output
     
     def reset_parameters(self):
@@ -505,7 +505,13 @@ class FeedForwardNetwork(nn.Module):
 
         self.fc1 = nn.Linear(embed_dim, ffn_dim)
         self.fc2 = nn.Linear(ffn_dim, embed_dim)
-        
+
+        # Initialize ffn_layernorm based on subln parameter
+        if subln:
+            self.ffn_layernorm = nn.LayerNorm(ffn_dim, eps=layernorm_eps)
+        else:
+            self.ffn_layernorm = None
+
         if subconv:
             self.dwconv = DWConv2d(ffn_dim, 3, 1, 1)
 
@@ -514,7 +520,7 @@ class FeedForwardNetwork(nn.Module):
             self.dropout = nn.Dropout(dropout)
         else:
             self.dropout = nn.Identity()
-            
+
         if activation_dropout > 0:
             self.activation_dropout = nn.Dropout(activation_dropout)
         else:
@@ -528,22 +534,29 @@ class FeedForwardNetwork(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
+        # Reset ffn_layernorm if it exists
+        if self.ffn_layernorm is not None:
+            self.ffn_layernorm.reset_parameters()
+
     def execute(self, x):
         """
         x: B, H, W, C
         """
-        residual = x
         x = self.fc1(x)
         x = self.activation_fn(x)
         x = self.activation_dropout(x)
-        
+
+        residual = x
         if self.subconv:
             x = self.dwconv(x)
-        
+
+        if self.ffn_layernorm is not None:
+            x = self.ffn_layernorm(x)
+
+        x = x + residual
         x = self.fc2(x)
         x = self.dropout(x)
-        x = x + residual
-        
+
         return x
 
 
@@ -569,18 +582,18 @@ class RGBD_Block(nn.Module):
         self.ffn_dim = ffn_dim
         self.layerscale = layerscale
 
-        # Layer normalization
-        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+        # Layer normalization - match PyTorch naming
+        self.layer_norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.layer_norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
 
-        # Geometry prior generator
-        self.geo_prior_gen = GeoPriorGen(embed_dim, num_heads, init_value, heads_range)
+        # Geometry prior generator - match PyTorch naming
+        self.Geo = GeoPriorGen(embed_dim, num_heads, init_value, heads_range)
         
-        # Attention module
+        # Attention module - match PyTorch naming
         if split_or_not:
-            self.attn = Decomposed_GSA(embed_dim, num_heads)
+            self.Attention = Decomposed_GSA(embed_dim, num_heads)
         else:
-            self.attn = Full_GSA(embed_dim, num_heads)
+            self.Attention = Full_GSA(embed_dim, num_heads)
 
         # Feed forward network
         self.ffn = FeedForwardNetwork(embed_dim, ffn_dim)
@@ -609,15 +622,15 @@ class RGBD_Block(nn.Module):
         
         B, H, W, C = x.shape
         depth_map = x_e # x_e is already in BCHW format
-        geo_prior = self.geo_prior_gen((H, W), depth_map, split_or_not)
+        geo_prior = self.Geo((H, W), depth_map, split_or_not)
 
         # Self-attention with layer scale
         if self.layerscale:
-            x = x + self.drop_path(self.gamma1 * self.attn(self.norm1(x), geo_prior, split_or_not))
-            x = x + self.drop_path(self.gamma2 * self.ffn(self.norm2(x)))
+            x = x + self.drop_path(self.gamma1 * self.Attention(self.layer_norm1(x), geo_prior, split_or_not))
+            x = x + self.drop_path(self.gamma2 * self.ffn(self.layer_norm2(x)))
         else:
-            x = x + self.drop_path(self.attn(self.norm1(x), geo_prior, split_or_not))
-            x = x + self.drop_path(self.ffn(self.norm2(x)))
+            x = x + self.drop_path(self.Attention(self.layer_norm1(x), geo_prior, split_or_not))
+            x = x + self.drop_path(self.ffn(self.layer_norm2(x)))
 
         return x # Return only x, not x_e
 
@@ -693,7 +706,7 @@ class dformerv2(nn.Module):
         self,
         out_indices=(0, 1, 2, 3),
         embed_dims=[64, 128, 256, 512],
-        depths=[2, 2, 8, 2],
+        depths=[3, 4, 18, 4],
         num_heads=[4, 4, 8, 16],
         init_values=[2, 2, 2, 2],
         heads_ranges=[4, 4, 6, 6],
@@ -726,7 +739,7 @@ class dformerv2(nn.Module):
         # Build layers
         self.layers = nn.ModuleList()
         for i in range(len(depths)):
-            split_or_not = i < 2  # Use decomposed attention for first two layers
+            split_or_not = (i != 3)  # Use decomposed attention for all layers except the last one (layer 3)
             layer = BasicLayer(
                 embed_dim=embed_dims[i],
                 out_dim=embed_dims[i + 1] if i < len(depths) - 1 else embed_dims[i],
@@ -734,7 +747,7 @@ class dformerv2(nn.Module):
                 num_heads=num_heads[i],
                 init_value=init_values[i],
                 heads_range=heads_ranges[i],
-                ffn_dim=mlp_ratios[i],
+                ffn_dim=int(mlp_ratios[i] * embed_dims[i]),
                 drop_path=dpr[sum(depths[:i]):sum(depths[:i + 1])],
                 split_or_not=split_or_not,
                 downsample=PatchMerging if i < len(depths) - 1 else None,

@@ -11,6 +11,11 @@ MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 
 export CUDA_VISIBLE_DEVICES="0"
 
+# Memory optimization environment variables
+export JT_SYNC=0
+export JT_LAZY=1
+export CUDA_LAUNCH_BLOCKING=0
+
 # For single GPU testing, use GPUS=1 and CUDA_VISIBLE_DEVICES="0"
 # GPUS=1
 # export CUDA_VISIBLE_DEVICES="0"
@@ -20,11 +25,11 @@ PYTHONPATH="$(dirname $0)/..":"$(dirname $0)":$PYTHONPATH \
     --config=local_configs.NYUDepthv2.DFormerv2_S \
     --gpus=$GPUS \
     --no-sliding \
-    --syncbn \
-    --mst \
+    --no-syncbn \
+    --no-mst \
     --no-amp \
-    --val_amp \
-    --pad_SUNRGBD \
+    --no-val_amp \
+    --no-pad_SUNRGBD \
     --no-use_seed
 
 # Available configurations for DFormers on NYUDepthv2:

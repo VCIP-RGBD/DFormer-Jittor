@@ -131,6 +131,7 @@ class RGBXDataset(Dataset):
         self._train_source = setting["train_source"]
         self._eval_source = setting["eval_source"]
         self.class_names = setting["class_names"]
+        self.num_classes = len(self.class_names) if self.class_names else 40  # Default to 40 for NYUDepthv2
         self._file_names = self._get_file_names(split_name)
         self._file_length = file_length
         self.preprocess = preprocess
@@ -256,55 +257,3 @@ class RGBXDataset(Dataset):
             return gt
         else:
             return gt
-        
-        # Get file paths
-        rgb_path, x_path, gt_path = get_path(
-            self.dataset_name,
-            self._rgb_path,
-            self._rgb_format,
-            self._x_path,
-            self._x_format,
-            self._gt_path,
-            self._gt_format,
-            'depth',  # x_modal
-            item_name,
-        )
-
-        # Load RGB image
-        rgb = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
-        if rgb is None:
-            raise FileNotFoundError(f"RGB image not found: {rgb_path}")
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-
-        # Load depth/modal image
-        if self._x_single_channel:
-            modal_x = cv2.imread(x_path, cv2.IMREAD_GRAYSCALE)
-            if modal_x is None:
-                raise FileNotFoundError(f"Modal image not found: {x_path}")
-            # Keep as single channel for DFormerv2
-            modal_x = np.expand_dims(modal_x, axis=2)
-        else:
-            modal_x = cv2.imread(x_path, cv2.IMREAD_COLOR)
-            if modal_x is None:
-                raise FileNotFoundError(f"Modal image not found: {x_path}")
-            modal_x = cv2.cvtColor(modal_x, cv2.COLOR_BGR2RGB)
-
-        # Load ground truth
-        gt = cv2.imread(gt_path, cv2.IMREAD_GRAYSCALE)
-        if gt is None:
-            raise FileNotFoundError(f"Ground truth not found: {gt_path}")
-
-        # Apply transformations if specified
-        if self._transform_gt and callable(self._transform_gt):
-            gt = self._transform_gt(gt)
-
-        # Apply preprocessing
-        if self.preprocess is not None:
-            rgb, gt, modal_x = self.preprocess(rgb, gt, modal_x)
-
-        # Convert to Jittor tensors
-        rgb = jt.array(rgb).float32()
-        modal_x = jt.array(modal_x).float32()
-        gt = jt.array(gt).int64()
-
-        return rgb, modal_x, gt

@@ -221,10 +221,13 @@ def get_train_loader(engine, dataset_cls, config):
         batch_size = config.batch_size // engine.world_size
         is_shuffle = False
 
+    # Reduce num_workers for training to prevent issues
+    train_num_workers = min(2, config.num_workers)  # Use at most 2 workers for training
+
     train_loader = train_dataset.set_attrs(
         batch_size=batch_size,
         shuffle=is_shuffle,
-        num_workers=config.num_workers,
+        num_workers=train_num_workers,
         drop_last=True
     )
 
@@ -265,10 +268,13 @@ def get_val_loader(engine, dataset_cls, config, val_batch_size=None):
         batch_size = val_batch_size // engine.world_size
         is_shuffle = False
 
+    # Set num_workers to 0 for validation to prevent deadlocks completely
+    val_num_workers = 0  # Use single-threaded loading for validation to avoid deadlocks
+
     val_loader = val_dataset.set_attrs(
         batch_size=batch_size,
         shuffle=is_shuffle,
-        num_workers=config.num_workers,
+        num_workers=val_num_workers,
         drop_last=False
     )
 

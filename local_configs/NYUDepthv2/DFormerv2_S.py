@@ -12,10 +12,10 @@ C.lr = 6e-5
 C.lr_power = 0.9
 C.momentum = 0.9
 C.weight_decay = 0.01
-C.batch_size = 6  # Stable size for GPU memory
+C.batch_size = 4  # Further reduced for GPU memory constraints
 C.nepochs = 500
 C.niters_per_epoch = C.num_train_imgs // C.batch_size + 1
-C.num_workers = 8  # Enable parallel data loading
+C.num_workers = 4  # Reduced for memory constraints and to prevent deadlocks
 C.train_scale_array = [0.5, 0.75, 1, 1.25, 1.5, 1.75]
 C.warm_up_epoch = 10
 

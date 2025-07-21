@@ -40,6 +40,7 @@ from utils.engine.logger import get_logger
 from utils.init_func import configure_optimizers, group_weight
 from utils.lr_policy import WarmUpPolyLR
 from utils.val_mm import evaluate, evaluate_msf
+from utils.metric import SegmentationMetric
 from utils.jt_utils import all_reduce_tensor
 
 
@@ -77,7 +78,15 @@ def set_seed(seed):
 
 
 def is_eval(epoch, config):
-    return epoch > int(config.checkpoint_start_epoch) or epoch == 1 or epoch % 10 == 0
+    # Disable evaluation in early training to avoid memory issues
+    if epoch <= 5:
+        return False;  # No evaluation in first 5 epochs
+    elif epoch <= 20:
+        return epoch % 5 == 0  # Evaluate every 5 epochs in early training
+    elif epoch <= 50:
+        return epoch % 10 == 0  # Evaluate every 10 epochs in mid training
+    else:
+        return epoch > int(config.checkpoint_start_epoch) or epoch % 25 == 0
 
 
 def main():
@@ -108,10 +117,20 @@ def main():
 
     args = parser.parse_args()
     
-    # Set Jittor optimization flags for better GPU utilization
+    # Set Jittor optimization flags for better GPU utilization and memory management
     jt.flags.use_cuda = 1
     jt.flags.lazy_execution = 1
     jt.flags.use_stat_allocator = 1
+
+    # Additional memory optimization flags
+    try:
+        jt.flags.auto_mixed_precision_level = 0  # Disable AMP to save memory
+    except AttributeError:
+        pass  # Flag not available in this Jittor version
+
+    # Set memory management
+    import os
+    os.environ['JT_SYNC'] = '0'  # Async execution for better memory management
     
     config = getattr(import_module(args.config), "C")
     
@@ -142,12 +161,14 @@ def main():
     
     train_loader, train_sampler = get_train_loader(engine, RGBXDataset, config)
     
-    val_dl_factor = 1.0
+    # Reduce validation batch size to prevent memory issues and deadlocks
+    val_dl_factor = 0.5  # Reduce validation batch size
+    val_batch_size = max(1, int(config.batch_size * val_dl_factor)) if config.dataset_name != "SUNRGBD" else 1
     val_loader, val_sampler = get_val_loader(
         engine,
         RGBXDataset,
         config,
-        val_batch_size=int(config.batch_size * val_dl_factor) if config.dataset_name != "SUNRGBD" else int(args.gpus),
+        val_batch_size=val_batch_size,
     )
     logger.info(f"val dataset len:{len(val_loader) * int(args.gpus)}")
     
@@ -268,29 +289,105 @@ def main():
                ((engine.distributed and engine.local_rank == 0) or not engine.distributed):
                 logger.info(print_str)
 
+            # Memory cleanup every 10 iterations to prevent OOM
+            if (idx + 1) % 10 == 0:
+                jt.clean()
+                # Reduce sync frequency to avoid performance issues
+                if (idx + 1) % 20 == 0:
+                    jt.sync_all()
+
         train_timer.stop()
         
         if is_eval(epoch, config):
             eval_timer.start()
             model.eval()
+
+            # Force cleanup and reset before evaluation
+            jt.clean()
+            jt.gc()  # Force garbage collection
+
+            # Recreate validation loader to avoid iterator conflicts
+            logger.info("Recreating validation loader for eval...")
+            val_loader, val_sampler = get_val_loader(
+                engine,
+                RGBXDataset,
+                config,
+                val_batch_size=val_batch_size,
+            )
+
+            # Reduce sync calls to prevent hanging
+            if epoch % 5 == 0:  # Only sync every 5 epochs
+                jt.sync_all()
+
             with jt.no_grad():
-                if args.mst:
-                    all_metrics = evaluate_msf(model, val_loader, config, [0.5, 0.75, 1.0, 1.25, 1.5], True, engine, sliding=args.sliding)
+                if args.sliding:
+                    # Use sliding window inference
+                    from utils.val_mm import sliding_window_inference
+                    metric = SegmentationMetric(val_loader.dataset.num_classes)
+                    
+                    for i, minibatch in enumerate(val_loader):
+                        rgb = minibatch['data']
+                        targets = minibatch['label']
+                        modal = minibatch['modal_x']
+
+                        pred_logits = sliding_window_inference(
+                            model, rgb, modal, [512, 512], [256, 256], val_loader.dataset.num_classes
+                        )
+
+                        predictions = jt.argmax(pred_logits, dim=1)
+                        metric.update(predictions.numpy(), targets.numpy())
+                    
+                    all_metrics = metric
+                elif args.mst and epoch > 50:
+                    # Use MST only after epoch 50 to avoid slowdown in early training
+                    all_metrics = evaluate_msf(model, val_loader, [0.75, 1.0, 1.25], False, verbose=False)  # Reduced scales and no flip
+                elif args.mst and epoch > 20:
+                    # Use limited MST after epoch 20
+                    all_metrics = evaluate_msf(model, val_loader, [1.0], False, verbose=False)  # Single scale, no flip
                 else:
-                    all_metrics = evaluate(model, val_loader, config, engine, sliding=args.sliding)
+                    # Use single scale evaluation in early training (much faster)
+                    logger.info(f"Starting single-scale evaluation for epoch {epoch}...")
+                    all_metrics = evaluate(model, val_loader, verbose=False)
+                    logger.info(f"Evaluation completed for epoch {epoch}")
 
                 if engine.distributed:
                     if engine.local_rank == 0:
-                        metric = all_metrics[0]
-                        for other_metric in all_metrics[1:]:
-                            metric.update_hist(other_metric.hist)
-                        ious, miou = metric.compute_iou()
-                        acc, macc = metric.compute_pixel_acc()
-                        f1, mf1 = metric.compute_f1()
+                        if args.sliding:
+                            # For sliding window, all_metrics is a SegmentationMetric object
+                            results = all_metrics.get_results()
+                            miou = results['mIoU']
+                            macc = results['mAcc']
+                            f1 = mf1 = 0.0  # F1 score not available in current implementation
+                        else:
+                            # For other evaluation methods, handle as before but expect dict return
+                            if isinstance(all_metrics, dict):
+                                miou = all_metrics['mIoU']
+                                macc = all_metrics['mAcc']
+                                f1 = mf1 = 0.0
+                            else:
+                                metric = all_metrics[0]
+                                for other_metric in all_metrics[1:]:
+                                    metric.update_hist(other_metric.hist)
+                                ious, miou = metric.compute_iou()
+                                acc, macc = metric.compute_pixel_acc()
+                                f1, mf1 = metric.compute_f1()
                 else:
-                    ious, miou = all_metrics.compute_iou()
-                    acc, macc = all_metrics.compute_pixel_acc()
-                    f1, mf1 = all_metrics.compute_f1()
+                    if args.sliding:
+                        # For sliding window, all_metrics is a SegmentationMetric object
+                        results = all_metrics.get_results()
+                        miou = results['mIoU']
+                        macc = results['mAcc']
+                        f1 = mf1 = 0.0  # F1 score not available in current implementation
+                    else:
+                        # For other evaluation methods, expect dict return
+                        if isinstance(all_metrics, dict):
+                            miou = all_metrics['mIoU']
+                            macc = all_metrics['mAcc']
+                            f1 = mf1 = 0.0
+                        else:
+                            ious, miou = all_metrics.compute_iou()
+                            acc, macc = all_metrics.compute_pixel_acc()
+                            f1, mf1 = all_metrics.compute_f1()
 
                 if (not engine.distributed) or (engine.distributed and engine.local_rank == 0):
                     if miou > best_miou:
@@ -303,13 +400,20 @@ def main():
                             metric=miou
                         )
                     logger.info(f"Epoch {epoch} validation result: mIoU {miou:.4f}, best mIoU {best_miou:.4f}")
+
+            # Clear memory after evaluation
+            jt.clean()
+            # Reduce sync frequency to prevent hanging
+            if epoch % 5 == 0:  # Only sync every 5 epochs
+                jt.sync_all()
             eval_timer.stop()
 
         if (not engine.distributed) or (engine.distributed and engine.local_rank == 0):
             eval_count = sum(1 for i in range(epoch + 1, config.nepochs + 1) if is_eval(i, config))
-            left_time = train_timer.mean_time * (config.nepochs - epoch) + eval_timer.mean_time * eval_count
+            eval_time = eval_timer.mean_time if eval_timer.mean_time is not None else 0.0
+            left_time = train_timer.mean_time * (config.nepochs - epoch) + eval_time * eval_count
             eta = (datetime.datetime.now() + datetime.timedelta(seconds=left_time)).strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"Avg train time: {train_timer.mean_time:.2f}s, avg eval time: {eval_timer.mean_time:.2f}s, left eval count: {eval_count}, ETA: {eta}")
+            logger.info(f"Avg train time: {train_timer.mean_time:.2f}s, avg eval time: {eval_time:.2f}s, left eval count: {eval_count}, ETA: {eta}")
 
 
 if __name__ == "__main__":

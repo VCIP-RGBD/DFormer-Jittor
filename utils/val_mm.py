@@ -16,119 +16,185 @@ from utils.transforms import pad_image_size_to_multiples_of
 def evaluate(model, data_loader, device=None, verbose=False):
     """Evaluate model on validation dataset."""
     model.eval()
-    
+
     metric = SegmentationMetric(data_loader.dataset.num_classes)
-    
+
+    # Force cleanup before starting evaluation
+    jt.clean()
+    jt.gc()
+
+    print(f"Starting evaluation with {len(data_loader)} batches...")
+
     with jt.no_grad():
-        for i, (images, targets) in enumerate(data_loader):
-            if isinstance(images, (list, tuple)):
-                # Multi-modal input (RGB + depth/modal)
-                rgb, modal = images
-                outputs = model(rgb, modal)
-            else:
-                # Single modal input
-                outputs = model(images)
-            
-            if isinstance(outputs, dict):
-                outputs = outputs['out']
-            
-            # Get predictions
-            predictions = jt.argmax(outputs, dim=1)
-            
-            # Update metrics
-            metric.update(predictions.numpy(), targets.numpy())
-            
-            if verbose and i % 100 == 0:
-                print(f"Processed {i}/{len(data_loader)} batches")
-    
+        batch_count = 0
+        try:
+            # Create a fresh iterator to avoid conflicts
+            data_iter = iter(data_loader)
+
+            for i in range(len(data_loader)):
+                try:
+                    # Get next batch with timeout protection
+                    minibatch = next(data_iter)
+                    batch_count += 1
+
+                    rgb = minibatch['data']
+                    targets = minibatch['label']
+                    modal = minibatch['modal_x']
+
+                    # Multi-modal input (RGB + depth/modal)
+                    outputs = model(rgb, modal)
+
+                    # Handle model output format
+                    if isinstance(outputs, (list, tuple)) and len(outputs) == 2:
+                        # Model returns [pred], loss format
+                        outputs = outputs[0]
+                        if isinstance(outputs, list):
+                            outputs = outputs[0]
+                    elif isinstance(outputs, dict):
+                        outputs = outputs['out']
+
+                    # Get predictions
+                    predictions = jt.argmax(outputs, dim=1)
+
+                    # Handle potential tuple return from argmax
+                    if isinstance(predictions, tuple):
+                        predictions = predictions[0]
+
+                    # Update metrics
+                    metric.update(predictions.numpy(), targets.numpy())
+
+                    # Clean memory every 10 batches to prevent accumulation
+                    if (i + 1) % 10 == 0:
+                        jt.clean()
+
+                    if verbose or i % 50 == 0:
+                        print(f"Processed batch {i+1}/{len(data_loader)}")
+
+                except StopIteration:
+                    print(f"Iterator exhausted at batch {i}")
+                    break
+                except Exception as e:
+                    print(f"Error processing batch {i}: {e}")
+                    continue
+
+        except Exception as e:
+            print(f"Error during evaluation: {e}")
+
+    print(f"Evaluation completed. Processed {batch_count} batches.")
+
     # Calculate metrics
     results = metric.get_results()
-    
+
+    # Final cleanup
+    jt.clean()
+
     return results
 
 
 def evaluate_msf(model, data_loader, scales=[1.0], flip=False, device=None, verbose=False):
     """Evaluate model with multi-scale and flip augmentation."""
     model.eval()
-    
+
     metric = SegmentationMetric(data_loader.dataset.num_classes)
-    
+
     with jt.no_grad():
-        for i, (images, targets) in enumerate(data_loader):
-            if isinstance(images, (list, tuple)):
-                rgb, modal = images
+        for i, minibatch in enumerate(data_loader):
+            try:
+                rgb = minibatch['data']
+                targets = minibatch['label']
+                modal = minibatch['modal_x']
                 batch_size, _, h, w = rgb.shape
-            else:
-                rgb = images
-                modal = None
-                batch_size, _, h, w = rgb.shape
-            
-            # Initialize prediction accumulator
-            pred_logits = jt.zeros((batch_size, data_loader.dataset.num_classes, h, w))
-            
-            # Multi-scale evaluation
-            for scale in scales:
-                if scale != 1.0:
-                    # Resize images
-                    new_h, new_w = int(h * scale), int(w * scale)
-                    rgb_scaled = jt.nn.interpolate(rgb, size=(new_h, new_w), mode='bilinear', align_corners=True)
-                    if modal is not None:
-                        modal_scaled = jt.nn.interpolate(modal, size=(new_h, new_w), mode='bilinear', align_corners=True)
-                else:
-                    rgb_scaled = rgb
-                    modal_scaled = modal
-                
-                # Forward pass
-                if modal_scaled is not None:
-                    outputs = model(rgb_scaled, modal_scaled)
-                else:
-                    outputs = model(rgb_scaled)
-                
-                if isinstance(outputs, dict):
-                    outputs = outputs['out']
-                
-                # Resize back to original size
-                if scale != 1.0:
-                    outputs = jt.nn.interpolate(outputs, size=(h, w), mode='bilinear', align_corners=True)
-                
-                pred_logits += outputs
-                
-                # Flip augmentation
-                if flip:
-                    # Horizontal flip
-                    rgb_flipped = jt.flip(rgb_scaled, dims=[3])
-                    if modal_scaled is not None:
-                        modal_flipped = jt.flip(modal_scaled, dims=[3])
-                        outputs_flipped = model(rgb_flipped, modal_flipped)
-                    else:
-                        outputs_flipped = model(rgb_flipped)
-                    
-                    if isinstance(outputs_flipped, dict):
-                        outputs_flipped = outputs_flipped['out']
-                    
-                    # Flip back and resize
-                    outputs_flipped = jt.flip(outputs_flipped, dims=[3])
+
+                # Initialize prediction accumulator
+                pred_logits = jt.zeros((batch_size, data_loader.dataset.num_classes, h, w))
+
+                # Multi-scale evaluation
+                for scale in scales:
                     if scale != 1.0:
-                        outputs_flipped = jt.nn.interpolate(outputs_flipped, size=(h, w), mode='bilinear', align_corners=True)
-                    
-                    pred_logits += outputs_flipped
-            
-            # Average predictions
-            num_augs = len(scales) * (2 if flip else 1)
-            pred_logits /= num_augs
-            
-            # Get final predictions
-            predictions = jt.argmax(pred_logits, dim=1)
-            
-            # Update metrics
-            metric.update(predictions.numpy(), targets.numpy())
-            
-            if verbose and i % 100 == 0:
-                print(f"Processed {i}/{len(data_loader)} batches")
-    
+                        # Resize images
+                        new_h, new_w = int(h * scale), int(w * scale)
+                        rgb_scaled = jt.nn.interpolate(rgb, size=(new_h, new_w), mode='bilinear', align_corners=True)
+                        if modal is not None:
+                            modal_scaled = jt.nn.interpolate(modal, size=(new_h, new_w), mode='bilinear', align_corners=True)
+                    else:
+                        rgb_scaled = rgb
+                        modal_scaled = modal
+
+                    # Forward pass
+                    if modal_scaled is not None:
+                        outputs = model(rgb_scaled, modal_scaled)
+                    else:
+                        outputs = model(rgb_scaled)
+
+                    # Handle model output format
+                    if isinstance(outputs, (list, tuple)) and len(outputs) == 2:
+                        # Model returns [pred], loss format
+                        outputs = outputs[0]
+                        if isinstance(outputs, list):
+                            outputs = outputs[0]
+                    elif isinstance(outputs, dict):
+                        outputs = outputs['out']
+
+                    # Resize back to original size
+                    if scale != 1.0:
+                        outputs = jt.nn.interpolate(outputs, size=(h, w), mode='bilinear', align_corners=True)
+
+                    pred_logits += outputs
+
+                    # Flip augmentation
+                    if flip:
+                        # Horizontal flip
+                        rgb_flipped = jt.flip(rgb_scaled, [3])
+                        if modal_scaled is not None:
+                            modal_flipped = jt.flip(modal_scaled, [3])
+                            outputs_flipped = model(rgb_flipped, modal_flipped)
+                        else:
+                            outputs_flipped = model(rgb_flipped)
+
+                        # Handle model output format
+                        if isinstance(outputs_flipped, (list, tuple)) and len(outputs_flipped) == 2:
+                            # Model returns [pred], loss format
+                            outputs_flipped = outputs_flipped[0]
+                            if isinstance(outputs_flipped, list):
+                                outputs_flipped = outputs_flipped[0]
+                        elif isinstance(outputs_flipped, dict):
+                            outputs_flipped = outputs_flipped['out']
+
+                        # Flip back and resize
+                        outputs_flipped = jt.flip(outputs_flipped, [3])
+                        if scale != 1.0:
+                            outputs_flipped = jt.nn.interpolate(outputs_flipped, size=(h, w), mode='bilinear', align_corners=True)
+
+                        pred_logits += outputs_flipped
+
+                # Average predictions
+                num_augs = len(scales) * (2 if flip else 1)
+                pred_logits /= num_augs
+
+                # Get final predictions
+                predictions = jt.argmax(pred_logits, dim=1)
+
+                # Handle potential tuple return from argmax
+                if isinstance(predictions, tuple):
+                    predictions = predictions[0]
+
+                # Update metrics
+                metric.update(predictions.numpy(), targets.numpy())
+
+                # Clean memory every 20 batches to prevent accumulation
+                if (i + 1) % 20 == 0:
+                    jt.clean()
+
+                if verbose and i % 100 == 0:
+                    print(f"Processed {i}/{len(data_loader)} batches")
+
+            except Exception as e:
+                print(f"Error processing batch {i}: {e}")
+                continue
+
     # Calculate metrics
     results = metric.get_results()
-    
+
     return results
 
 

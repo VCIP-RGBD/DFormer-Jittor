@@ -148,6 +148,8 @@ results/
 /results/
 figs/
 
+trash/
+/trash/
 # User-uploaded files (if any)
 uploads/
 
@@ -156,3 +158,6 @@ tmp/
 /tmp/
 temp/
 /temp/ 
+
+DFormer/
+/DFormer/
