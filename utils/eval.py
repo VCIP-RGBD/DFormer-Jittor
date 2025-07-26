@@ -4,28 +4,35 @@ Adapted from PyTorch version for Jittor framework
 """
 
 import os
+import sys
 import time
 import argparse
 import numpy as np
 import jittor as jt
 from jittor import nn
 
-from utils.dataloader import get_val_loader
+# Add current directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.dataloader.dataloader import get_val_loader
+from utils.dataloader.RGBXDataset import RGBXDataset
 from utils.metric import SegmentationMetric, AverageMeter
 from utils.val_mm import evaluate, evaluate_msf, sliding_window_inference
 from utils.jt_utils import load_model, AverageMeter, Timer
-from utils.engine import Engine
+from utils.engine.engine import Engine
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='DFormer Evaluation')
     parser.add_argument('--config', required=True, help='config file path')
-    parser.add_argument('--checkpoint', required=True, help='checkpoint file path')
+    parser.add_argument('--continue_fpath', required=True, help='checkpoint file path')
+    parser.add_argument('--gpus', type=int, default=1, help='number of GPUs')
     parser.add_argument('--dataset', default='nyudepthv2', help='dataset name')
     parser.add_argument('--batch-size', type=int, default=1, help='batch size')
     parser.add_argument('--num-workers', type=int, default=4, help='number of workers')
     parser.add_argument('--scales', nargs='+', type=float, default=[1.0], help='evaluation scales')
+    parser.add_argument('--multi_scale', action='store_true', help='use multi-scale evaluation')
     parser.add_argument('--flip', action='store_true', help='use flip augmentation')
     parser.add_argument('--sliding', action='store_true', help='use sliding window inference')
     parser.add_argument('--window-size', nargs=2, type=int, default=[512, 512], help='sliding window size')
@@ -33,7 +40,7 @@ def parse_args():
     parser.add_argument('--save-pred', action='store_true', help='save predictions')
     parser.add_argument('--pred-dir', default='./predictions', help='prediction save directory')
     parser.add_argument('--verbose', action='store_true', help='verbose output')
-    
+
     return parser.parse_args()
 
 
@@ -42,20 +49,21 @@ def main():
     args = parse_args()
     
     # Load config
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("config", args.config)
-    config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config)
+    from importlib import import_module
+    config = getattr(import_module(args.config), "C")
     
     # Set device
     jt.flags.use_cuda = 1
-    
+
+    # Create engine (simplified for evaluation)
+    engine = Engine()
+
     # Create data loader
-    val_loader = get_val_loader(
+    val_loader, val_sampler = get_val_loader(
+        engine=engine,
+        dataset_cls=RGBXDataset,
         config=config,
-        dataset=args.dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers
+        val_batch_size=args.batch_size
     )
     
     print(f"Dataset: {args.dataset}")
@@ -67,9 +75,9 @@ def main():
     model = build_model(config)
     
     # Load checkpoint
-    if args.checkpoint:
-        print(f"Loading checkpoint from {args.checkpoint}")
-        model = load_model(model, args.checkpoint)
+    if args.continue_fpath:
+        print(f"Loading checkpoint from {args.continue_fpath}")
+        model = load_model(model, args.continue_fpath)
     
     model.eval()
     
@@ -86,11 +94,16 @@ def main():
         results = evaluate_sliding_window(
             model, val_loader, args.window_size, args.stride, args.verbose
         )
-    elif len(args.scales) > 1 or args.flip:
+    elif args.multi_scale or len(args.scales) > 1 or args.flip:
         # Multi-scale evaluation
-        results = evaluate_msf(
-            model, val_loader, args.scales, args.flip, verbose=args.verbose
+        if args.multi_scale:
+            scales = [0.5, 0.75, 1.0, 1.25, 1.5]
+        else:
+            scales = args.scales
+        metric = evaluate_msf(
+            model, val_loader, config=config, scales=scales, flip=args.flip, sliding=args.sliding
         )
+        results = metric.get_results()
     else:
         # Standard evaluation
         results = evaluate(model, val_loader, verbose=args.verbose)

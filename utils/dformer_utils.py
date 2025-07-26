@@ -500,19 +500,47 @@ def _convert_pytorch_checkpoint(checkpoint):
 
 
 def _clean_state_dict_keys(state_dict):
-    """Clean up state dict keys by removing common prefixes."""
+    """Clean up state dict keys by removing common prefixes and mapping PyTorch to Jittor structure."""
     if not isinstance(state_dict, dict):
         return state_dict
 
-    prefixes_to_remove = ['module.', 'backbone.', 'encoder.', 'model.']
-
     cleaned_state_dict = {}
+    
+    # Key mappings for common PyTorch to Jittor differences
+    key_mappings = {
+        # Normalization layer mappings
+        'backbone.norm0': 'backbone.downsample_layers.0.1',
+        'backbone.norm1': 'backbone.downsample_layers.1.0',
+        'backbone.norm2': 'backbone.downsample_layers.2.0', 
+        'backbone.norm3': 'backbone.downsample_layers.3.0',
+        
+        # Decoder head mappings
+        'decode_head.conv_seg': 'decode_head.cls_seg',
+        'decode_head.squeeze.bn': 'decode_head.squeeze.norm',
+        'decode_head.hamburger.ham_out.bn': 'decode_head.hamburger.ham_out.norm',
+        'decode_head.align.bn': 'decode_head.align.norm',
+    }
+    
     for key, value in state_dict.items():
         cleaned_key = key
+        
+        # Remove common prefixes
+        prefixes_to_remove = ['module.', 'encoder.', 'model.']
         for prefix in prefixes_to_remove:
             if cleaned_key.startswith(prefix):
                 cleaned_key = cleaned_key[len(prefix):]
                 break
+        
+        # Apply specific key mappings
+        for old_pattern, new_pattern in key_mappings.items():
+            if cleaned_key.startswith(old_pattern):
+                cleaned_key = cleaned_key.replace(old_pattern, new_pattern, 1)
+                break
+                
+        # Skip keys that are specific to PyTorch BatchNorm tracking
+        if '.num_batches_tracked' in cleaned_key:
+            continue
+            
         cleaned_state_dict[cleaned_key] = value
 
     return cleaned_state_dict

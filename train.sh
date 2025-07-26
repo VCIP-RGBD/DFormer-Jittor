@@ -9,7 +9,7 @@ NODE_RANK=${NODE_RANK:-0}
 PORT=${PORT:-29158}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 
-export CUDA_VISIBLE_DEVICES="0"
+export CUDA_VISIBLE_DEVICES="1"
 
 # Memory optimization environment variables
 export JT_SYNC=0

@@ -7,8 +7,8 @@ set -e  # Exit on any error
 
 # Default configuration
 GPUS=${GPUS:-1}
-CONFIG=${CONFIG:-"local_configs.NYUDepthv2.DFormer_Small"}
-CHECKPOINT=${CHECKPOINT:-"/caojiaolong/hjd/DFormer-Jittor/checkpoints/NYUDepthv2/DFormerv2_Small_NYU.pth"}
+CONFIG=${CONFIG:-"local_configs.NYUDepthv2.DFormer_Large"}
+CHECKPOINT=${CHECKPOINT:-"/caojiaolong/hjd/DFormer-Jittor/checkpoints/trained/NYUv2_DFormer_Large.pth"}
 OUTPUT_DIR=${OUTPUT_DIR:-"/caojiaolong/hjd/DFormer-Jittor/output"}
 VERBOSE=${VERBOSE:-false}
 MULTI_SCALE=${MULTI_SCALE:-false}

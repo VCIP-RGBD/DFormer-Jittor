@@ -69,7 +69,9 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
     # Load PyTorch checkpoint
     try:
         pytorch_checkpoint = torch.load(pytorch_checkpoint_path, map_location='cpu')
-        if 'state_dict' in pytorch_checkpoint:
+        if 'model' in pytorch_checkpoint:
+            pytorch_state_dict = pytorch_checkpoint['model']
+        elif 'state_dict' in pytorch_checkpoint:
             pytorch_state_dict = pytorch_checkpoint['state_dict']
         else:
             pytorch_state_dict = pytorch_checkpoint
@@ -82,51 +84,50 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
 
     # Convert compatible weights
     converted_count = 0
+    skipped_count = 0
     total_pytorch_params = len(pytorch_state_dict)
 
     print(f"Converting {total_pytorch_params} PyTorch parameters to Jittor format...")
 
-    # Only convert patch embedding weights that have exact matches
-    patch_embed_mapping = {
-        'patch_embed.proj.0.weight': 'backbone.downsample_layers.0.0.weight',
-        'patch_embed.proj.0.bias': 'backbone.downsample_layers.0.0.bias',
-        'patch_embed.proj.1.weight': 'backbone.downsample_layers.0.1.weight',
-        'patch_embed.proj.1.bias': 'backbone.downsample_layers.0.1.bias',
-        'patch_embed.proj.1.running_mean': 'backbone.downsample_layers.0.1.running_mean',
-        'patch_embed.proj.1.running_var': 'backbone.downsample_layers.0.1.running_var',
-    }
-
-    # Convert weights with exact shape matches
+    # Convert weights with exact key and shape matches
     for pytorch_key, pytorch_tensor in pytorch_state_dict.items():
-        jittor_key = None
+        # Skip num_batches_tracked parameters (not needed in Jittor)
+        if 'num_batches_tracked' in pytorch_key:
+            skipped_count += 1
+            continue
 
-        # Check patch embedding mapping
-        if pytorch_key in patch_embed_mapping:
-            jittor_key = patch_embed_mapping[pytorch_key]
-
-        # Convert tensor and check shape compatibility
-        if jittor_key and jittor_key in jittor_state_dict:
+        # Check if the key exists in Jittor model
+        if pytorch_key in jittor_state_dict:
             try:
                 # Convert PyTorch tensor to numpy then to Jittor
                 numpy_tensor = pytorch_tensor.detach().cpu().numpy()
                 jittor_tensor = jt.array(numpy_tensor)
 
                 # Check shape compatibility
-                expected_shape = jittor_state_dict[jittor_key].shape
+                expected_shape = jittor_state_dict[pytorch_key].shape
                 if tuple(jittor_tensor.shape) == tuple(expected_shape):
-                    jittor_state_dict[jittor_key] = jittor_tensor
+                    jittor_state_dict[pytorch_key] = jittor_tensor
                     converted_count += 1
-                    print(f"✓ Converted: {pytorch_key} -> {jittor_key}")
+                    if converted_count <= 10:  # Only print first 10 for brevity
+                        print(f"✓ Converted: {pytorch_key}")
                 else:
-                    print(f"✗ Shape mismatch for {jittor_key}: expected {expected_shape}, got {jittor_tensor.shape}")
+                    print(f"✗ Shape mismatch for {pytorch_key}: expected {expected_shape}, got {jittor_tensor.shape}")
+                    skipped_count += 1
             except Exception as e:
                 print(f"✗ Error converting {pytorch_key}: {e}")
+                skipped_count += 1
+        else:
+            skipped_count += 1
 
     # Load the updated state dict
     try:
         model.load_state_dict(jittor_state_dict)
         print(f"Successfully converted and loaded {converted_count}/{total_pytorch_params} parameters")
-        print("Note: Remaining parameters use random initialization")
+        print(f"Skipped {skipped_count} parameters (incompatible or not needed)")
+        if converted_count > 0:
+            print("✓ Model weights loaded successfully!")
+        else:
+            print("⚠ Warning: No weights were loaded - model uses random initialization")
         return model
     except Exception as e:
         print(f"Error loading converted state dict: {e}")

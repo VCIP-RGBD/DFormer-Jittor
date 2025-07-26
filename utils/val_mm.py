@@ -13,6 +13,72 @@ from utils.metric import SegmentationMetric
 from utils.transforms import pad_image_size_to_multiples_of
 
 
+def slide_inference(model, image, modal_x, config):
+    """Sliding window inference for large images."""
+    import math
+
+    # Get sliding window parameters from config
+    crop_size = getattr(config, 'crop_size', [512, 512])
+    stride_rate = getattr(config, 'stride_rate', 2/3)
+
+    if isinstance(crop_size, int):
+        crop_size = [crop_size, crop_size]
+
+    stride = [int(crop_size[0] * stride_rate), int(crop_size[1] * stride_rate)]
+
+    batch_size, _, h, w = image.shape
+    num_classes = config.num_classes
+
+    # Initialize prediction and count matrices
+    preds = jt.zeros((batch_size, num_classes, h, w))
+    count_mat = jt.zeros((batch_size, 1, h, w))
+
+    # Calculate crop positions
+    h_grids = max(h - crop_size[0] + stride[0] - 1, 0) // stride[0] + 1
+    w_grids = max(w - crop_size[1] + stride[1] - 1, 0) // stride[1] + 1
+
+    for h_idx in range(h_grids):
+        for w_idx in range(w_grids):
+            y1 = h_idx * stride[0]
+            x1 = w_idx * stride[1]
+            y2 = min(y1 + crop_size[0], h)
+            x2 = min(x1 + crop_size[1], w)
+            y1 = max(y2 - crop_size[0], 0)
+            x1 = max(x2 - crop_size[1], 0)
+
+            crop_img = image[:, :, y1:y2, x1:x2]
+            crop_modal_xs = modal_x[:, :, y1:y2, x1:x2]
+
+            # Forward pass
+            crop_seg_logit = model(crop_img, crop_modal_xs)
+
+            # Handle model output format
+            if isinstance(crop_seg_logit, (list, tuple)):
+                if len(crop_seg_logit) == 2:
+                    crop_seg_logit = crop_seg_logit[0]
+                if isinstance(crop_seg_logit, list):
+                    crop_seg_logit = crop_seg_logit[0]
+            elif isinstance(crop_seg_logit, dict):
+                crop_seg_logit = crop_seg_logit['out']
+
+            # Pad and add to predictions
+            pad_left, pad_right = x1, preds.shape[3] - x2
+            pad_top, pad_bottom = y1, preds.shape[2] - y2
+
+            crop_seg_logit = jt.nn.pad(crop_seg_logit,
+                                     (pad_left, pad_right, pad_top, pad_bottom),
+                                     mode='constant', value=0)
+
+            preds += crop_seg_logit
+            count_mat[:, :, y1:y2, x1:x2] += 1
+
+    # Avoid division by zero
+    count_mat = jt.maximum(count_mat, jt.ones_like(count_mat))
+    seg_logits = preds / count_mat
+
+    return seg_logits
+
+
 def evaluate(model, data_loader, device=None, verbose=False):
     """Evaluate model on validation dataset."""
     model.eval()
@@ -59,9 +125,23 @@ def evaluate(model, data_loader, device=None, verbose=False):
                     # Handle potential tuple return from argmax
                     if isinstance(predictions, tuple):
                         predictions = predictions[0]
+                    
+                    # Ensure predictions is a valid Jittor tensor
+                    if not isinstance(predictions, jt.Var):
+                        print(f"Warning: predictions is not a Jittor tensor, type: {type(predictions)}")
+                        continue
+
+                    # Get numpy arrays for metric calculation
+                    try:
+                        pred_numpy = predictions.numpy()
+                        target_numpy = targets.numpy()
+                    except AttributeError as e:
+                        print(f"Error converting to numpy: {e}")
+                        print(f"predictions type: {type(predictions)}, targets type: {type(targets)}")
+                        continue
 
                     # Update metrics
-                    metric.update(predictions.numpy(), targets.numpy())
+                    metric.update(pred_numpy, target_numpy)
 
                     # Clean memory every 10 batches to prevent accumulation
                     if (i + 1) % 10 == 0:
@@ -91,111 +171,174 @@ def evaluate(model, data_loader, device=None, verbose=False):
     return results
 
 
-def evaluate_msf(model, data_loader, scales=[1.0], flip=False, device=None, verbose=False):
+def evaluate_msf(model, data_loader, config=None, device=None, scales=[1.0], flip=False, engine=None, save_dir=None, sliding=False):
     """Evaluate model with multi-scale and flip augmentation."""
+    import math
     model.eval()
 
-    metric = SegmentationMetric(data_loader.dataset.num_classes)
+    # Use config if provided, otherwise use data_loader info
+    if config is not None:
+        n_classes = config.num_classes
+        background = getattr(config, 'background', 255)
+    else:
+        n_classes = data_loader.dataset.num_classes
+        background = 255
+
+    metric = SegmentationMetric(n_classes)
 
     with jt.no_grad():
-        for i, minibatch in enumerate(data_loader):
+        for idx, minibatch in enumerate(data_loader):
+            # Progress logging similar to PyTorch version
+            if ((idx + 1) % int(len(data_loader) * 0.5) == 0 or idx == 0):
+                if engine is None or not engine.distributed or engine.local_rank == 0:
+                    print(f"Validation Iter: {idx + 1} / {len(data_loader)}")
+
             try:
-                rgb = minibatch['data']
-                targets = minibatch['label']
-                modal = minibatch['modal_x']
-                batch_size, _, h, w = rgb.shape
+                images = minibatch['data']
+                labels = minibatch['label']
+                modal_xs = minibatch['modal_x']
 
-                # Initialize prediction accumulator
-                pred_logits = jt.zeros((batch_size, data_loader.dataset.num_classes, h, w))
+                B, H, W = labels.shape
+                scaled_logits = jt.zeros((B, n_classes, H, W))
 
-                # Multi-scale evaluation
+                # Multi-scale evaluation - follow PyTorch version exactly
                 for scale in scales:
-                    if scale != 1.0:
-                        # Resize images
-                        new_h, new_w = int(h * scale), int(w * scale)
-                        rgb_scaled = jt.nn.interpolate(rgb, size=(new_h, new_w), mode='bilinear', align_corners=True)
-                        if modal is not None:
-                            modal_scaled = jt.nn.interpolate(modal, size=(new_h, new_w), mode='bilinear', align_corners=True)
-                    else:
-                        rgb_scaled = rgb
-                        modal_scaled = modal
+                    # Calculate new dimensions and align to 32 (same as PyTorch)
+                    new_H, new_W = int(scale * H), int(scale * W)
+                    new_H, new_W = (
+                        int(math.ceil(new_H / 32)) * 32,
+                        int(math.ceil(new_W / 32)) * 32,
+                    )
+
+                    # Scale images
+                    scaled_images = [
+                        jt.nn.interpolate(images, size=(new_H, new_W), mode='bilinear', align_corners=True),
+                        jt.nn.interpolate(modal_xs, size=(new_H, new_W), mode='bilinear', align_corners=True)
+                    ]
 
                     # Forward pass
-                    if modal_scaled is not None:
-                        outputs = model(rgb_scaled, modal_scaled)
+                    if sliding:
+                        logits = slide_inference(model, scaled_images[0], scaled_images[1], config)
                     else:
-                        outputs = model(rgb_scaled)
+                        logits = model(scaled_images[0], scaled_images[1])
 
                     # Handle model output format
-                    if isinstance(outputs, (list, tuple)) and len(outputs) == 2:
-                        # Model returns [pred], loss format
-                        outputs = outputs[0]
-                        if isinstance(outputs, list):
-                            outputs = outputs[0]
-                    elif isinstance(outputs, dict):
-                        outputs = outputs['out']
+                    if isinstance(logits, (list, tuple)):
+                        if len(logits) == 2:
+                            logits = logits[0]
+                        if isinstance(logits, list):
+                            logits = logits[0]
+                    elif isinstance(logits, dict):
+                        logits = logits['out']
 
                     # Resize back to original size
-                    if scale != 1.0:
-                        outputs = jt.nn.interpolate(outputs, size=(h, w), mode='bilinear', align_corners=True)
-
-                    pred_logits += outputs
+                    logits = jt.nn.interpolate(logits, size=(H, W), mode='bilinear', align_corners=True)
+                    # Apply softmax and accumulate (same as PyTorch)
+                    scaled_logits += jt.nn.softmax(logits, dim=1)
 
                     # Flip augmentation
                     if flip:
-                        # Horizontal flip
-                        rgb_flipped = jt.flip(rgb_scaled, [3])
-                        if modal_scaled is not None:
-                            modal_flipped = jt.flip(modal_scaled, [3])
-                            outputs_flipped = model(rgb_flipped, modal_flipped)
+                        scaled_images_flipped = [jt.flip(img, [3]) for img in scaled_images]
+                        if sliding:
+                            logits_flipped = slide_inference(model, scaled_images_flipped[0], scaled_images_flipped[1], config)
                         else:
-                            outputs_flipped = model(rgb_flipped)
+                            logits_flipped = model(scaled_images_flipped[0], scaled_images_flipped[1])
 
                         # Handle model output format
-                        if isinstance(outputs_flipped, (list, tuple)) and len(outputs_flipped) == 2:
-                            # Model returns [pred], loss format
-                            outputs_flipped = outputs_flipped[0]
-                            if isinstance(outputs_flipped, list):
-                                outputs_flipped = outputs_flipped[0]
-                        elif isinstance(outputs_flipped, dict):
-                            outputs_flipped = outputs_flipped['out']
+                        if isinstance(logits_flipped, (list, tuple)):
+                            if len(logits_flipped) == 2:
+                                logits_flipped = logits_flipped[0]
+                            if isinstance(logits_flipped, list):
+                                logits_flipped = logits_flipped[0]
+                        elif isinstance(logits_flipped, dict):
+                            logits_flipped = logits_flipped['out']
 
                         # Flip back and resize
-                        outputs_flipped = jt.flip(outputs_flipped, [3])
-                        if scale != 1.0:
-                            outputs_flipped = jt.nn.interpolate(outputs_flipped, size=(h, w), mode='bilinear', align_corners=True)
+                        logits_flipped = jt.flip(logits_flipped, [3])
+                        logits_flipped = jt.nn.interpolate(logits_flipped, size=(H, W), mode='bilinear', align_corners=True)
+                        # Apply softmax and accumulate (same as PyTorch)
+                        scaled_logits += jt.nn.softmax(logits_flipped, dim=1)
 
-                        pred_logits += outputs_flipped
+                # Get final predictions from accumulated softmax probabilities
+                predictions = jt.argmax(scaled_logits, 1)[0]  # Jittor argmax returns tuple
 
-                # Average predictions
-                num_augs = len(scales) * (2 if flip else 1)
-                pred_logits /= num_augs
+                # Ensure predictions are in the right format for metrics
+                if not isinstance(predictions, jt.Var):
+                    print(f"Warning: predictions is not a Jittor tensor, type: {type(predictions)}")
+                    continue
+                    
+                try:
+                    pred_numpy = predictions.numpy()
+                    label_numpy = labels.numpy()
+                except AttributeError as e:
+                    print(f"Error converting to numpy: {e}")
+                    print(f"predictions type: {type(predictions)}, labels type: {type(labels)}")
+                    continue
 
-                # Get final predictions
-                predictions = jt.argmax(pred_logits, dim=1)
+                # Save predictions if save_dir is provided (same format as PyTorch)
+                if save_dir is not None:
+                    import pathlib
+                    import matplotlib.pyplot as plt
+                    from matplotlib.colors import ListedColormap
 
-                # Handle potential tuple return from argmax
-                if isinstance(predictions, tuple):
-                    predictions = predictions[0]
+                    palette = [
+                        [128, 64, 128], [244, 35, 232], [70, 70, 70], [102, 102, 156],
+                        [190, 153, 153], [153, 153, 153], [250, 170, 30], [220, 220, 0],
+                        [107, 142, 35], [152, 251, 152], [70, 130, 180], [220, 20, 60],
+                        [255, 0, 0], [0, 0, 142], [0, 0, 70], [0, 60, 100],
+                        [0, 80, 100], [0, 0, 230], [119, 11, 32],
+                    ]
+                    palette = np.array(palette, dtype=np.uint8)
 
-                # Update metrics
-                metric.update(predictions.numpy(), targets.numpy())
+                    if 'fn' in minibatch:
+                        names = minibatch["fn"][0].replace(".jpg", "").replace(".png", "").replace("datasets/", "")
+                        save_name = save_dir + "/" + names + "_pred.png"
+                        pathlib.Path(save_name).parent.mkdir(parents=True, exist_ok=True)
+                        # Handle Jittor argmax which returns tuple
+                        preds = scaled_logits.argmax(1)[0].numpy().squeeze().astype(np.uint8)
+
+                        if config and hasattr(config, 'dataset_name'):
+                            if config.dataset_name in ["KITTI-360", "EventScape"]:
+                                preds = palette[preds]
+                                plt.imsave(save_name, preds)
+                            elif config.dataset_name in ["NYUDepthv2", "SUNRGBD"]:
+                                try:
+                                    palette = np.load("./utils/nyucmap.npy")
+                                    preds = palette[preds]
+                                    plt.imsave(save_name, preds)
+                                except:
+                                    cv2.imwrite(save_name, preds)
+                            elif config.dataset_name in ["MFNet"]:
+                                palette = np.array([
+                                    [0, 0, 0], [64, 0, 128], [64, 64, 0], [0, 128, 192],
+                                    [0, 0, 192], [128, 128, 0], [64, 64, 128], [192, 128, 128],
+                                    [192, 64, 0],
+                                ], dtype=np.uint8)
+                                preds = palette[preds]
+                                plt.imsave(save_name, preds)
+                            else:
+                                cv2.imwrite(save_name, preds)
+                        else:
+                            cv2.imwrite(save_name, preds)
+
+                # Update metrics using the same interface as PyTorch version
+                metric.update(pred_numpy, label_numpy)
 
                 # Clean memory every 20 batches to prevent accumulation
-                if (i + 1) % 20 == 0:
+                if (idx + 1) % 20 == 0:
                     jt.clean()
 
-                if verbose and i % 100 == 0:
-                    print(f"Processed {i}/{len(data_loader)} batches")
-
             except Exception as e:
-                print(f"Error processing batch {i}: {e}")
+                print(f"Error processing batch {idx}: {e}")
                 continue
 
-    # Calculate metrics
-    results = metric.get_results()
-
-    return results
+    # Return metric object for compatibility with PyTorch version
+    if engine and engine.distributed:
+        # For distributed evaluation, we would need to gather metrics
+        # For now, return the local metric
+        return metric
+    else:
+        return metric
 
 
 def sliding_window_inference(model, image, modal=None, window_size=(512, 512), stride=(256, 256), num_classes=40):
@@ -284,7 +427,8 @@ def test_single_image(model, image_path, modal_path=None, output_path=None, conf
         if isinstance(output, dict):
             output = output['out']
         
-        prediction = jt.argmax(output, dim=1).squeeze(0).numpy()
+        # Handle Jittor argmax which returns tuple
+        prediction = jt.argmax(output, 1)[0].squeeze(0).numpy()
     
     # Save result if output path provided
     if output_path:

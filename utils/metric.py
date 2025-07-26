@@ -8,76 +8,130 @@ from collections import OrderedDict
 
 
 class SegmentationMetric(object):
-    """Segmentation evaluation metrics."""
-    
+    """Segmentation evaluation metrics compatible with PyTorch Metrics class."""
+
     def __init__(self, num_classes, ignore_index=255):
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         self.reset()
-    
+
     def reset(self):
         """Reset all metrics."""
-        self.confusion_matrix = np.zeros((self.num_classes, self.num_classes))
-    
+        self.hist = np.zeros((self.num_classes, self.num_classes))
+        self.confusion_matrix = self.hist  # Alias for compatibility
+
+    def update_hist(self, hist):
+        """Update histogram for distributed training compatibility."""
+        self.hist += hist
+        self.confusion_matrix = self.hist
+
     def update(self, pred, target):
-        """Update metrics with new predictions and targets."""
+        """Update metrics with new predictions and targets.
+
+        Args:
+            pred: Predictions (logits or probabilities) or already argmaxed predictions
+            target: Ground truth labels
+        """
+        import jittor as jt
+
+        # Handle Jittor tensors
+        if hasattr(pred, 'numpy'):
+            pred = pred.numpy()
+        if hasattr(target, 'numpy'):
+            target = target.numpy()
+
+        # If pred has multiple dimensions (logits), take argmax
+        if len(pred.shape) > len(target.shape):
+            pred = np.argmax(pred, axis=1)
+
         pred = pred.astype(np.int64)
         target = target.astype(np.int64)
-        
+
+        # Flatten arrays
+        pred = pred.flatten()
+        target = target.flatten()
+
         # Mask out ignore index
-        mask = (target != self.ignore_index)
-        pred = pred[mask]
-        target = target[mask]
-        
-        # Update confusion matrix
-        for i in range(self.num_classes):
-            for j in range(self.num_classes):
-                self.confusion_matrix[i, j] += np.sum((target == i) & (pred == j))
+        keep = target != self.ignore_index
+        pred = pred[keep]
+        target = target[keep]
+
+        # Clip predictions to valid range to avoid out-of-bounds issues
+        pred = np.clip(pred, 0, self.num_classes - 1)
+        target = np.clip(target, 0, self.num_classes - 1)
+
+        # Update histogram using bincount (same as PyTorch version)
+        hist_update = np.bincount(
+            target * self.num_classes + pred,
+            minlength=self.num_classes**2
+        ).reshape(self.num_classes, self.num_classes)
+
+        self.hist += hist_update
+        self.confusion_matrix = self.hist
     
+    def compute_iou(self):
+        """Compute IoU metrics compatible with PyTorch version."""
+        ious = np.diag(self.hist) / (self.hist.sum(0) + self.hist.sum(1) - np.diag(self.hist))
+        ious[np.isnan(ious)] = 0.0
+        miou = np.mean(ious)
+
+        # Convert to percentage and round like PyTorch version
+        ious_percent = (ious * 100).round(2).tolist()
+        miou_percent = round(miou * 100, 2)
+
+        return ious_percent, miou_percent
+
+    def compute_f1(self):
+        """Compute F1 metrics compatible with PyTorch version."""
+        f1 = 2 * np.diag(self.hist) / (self.hist.sum(0) + self.hist.sum(1))
+        f1[np.isnan(f1)] = 0.0
+        mf1 = np.mean(f1)
+
+        # Convert to percentage and round like PyTorch version
+        f1_percent = (f1 * 100).round(2).tolist()
+        mf1_percent = round(mf1 * 100, 2)
+
+        return f1_percent, mf1_percent
+
+    def compute_pixel_acc(self):
+        """Compute pixel accuracy metrics compatible with PyTorch version."""
+        acc = np.diag(self.hist) / self.hist.sum(1)
+        acc[np.isnan(acc)] = 0.0
+        macc = np.mean(acc)
+
+        # Convert to percentage and round like PyTorch version
+        acc_percent = (acc * 100).round(2).tolist()
+        macc_percent = round(macc * 100, 2)
+
+        return acc_percent, macc_percent
+
     def get_results(self):
         """Calculate and return all metrics."""
         results = OrderedDict()
-        
+
         # Per-class IoU
-        iou_per_class = []
-        for i in range(self.num_classes):
-            tp = self.confusion_matrix[i, i]
-            fp = np.sum(self.confusion_matrix[:, i]) - tp
-            fn = np.sum(self.confusion_matrix[i, :]) - tp
-            
-            if tp + fp + fn == 0:
-                iou = 0.0
-            else:
-                iou = tp / (tp + fp + fn)
-            iou_per_class.append(iou)
-        
-        results['IoU_per_class'] = iou_per_class
+        iou_per_class = np.diag(self.hist) / (self.hist.sum(0) + self.hist.sum(1) - np.diag(self.hist))
+        iou_per_class[np.isnan(iou_per_class)] = 0.0
+
+        results['IoU_per_class'] = iou_per_class.tolist()
         results['mIoU'] = np.mean(iou_per_class)
-        
+
         # Per-class accuracy
-        acc_per_class = []
-        for i in range(self.num_classes):
-            tp = self.confusion_matrix[i, i]
-            total = np.sum(self.confusion_matrix[i, :])
-            
-            if total == 0:
-                acc = 0.0
-            else:
-                acc = tp / total
-            acc_per_class.append(acc)
-        
-        results['Acc_per_class'] = acc_per_class
+        acc_per_class = np.diag(self.hist) / self.hist.sum(1)
+        acc_per_class[np.isnan(acc_per_class)] = 0.0
+
+        results['Acc_per_class'] = acc_per_class.tolist()
         results['mAcc'] = np.mean(acc_per_class)
-        
+
         # Overall accuracy
-        total_correct = np.sum(np.diag(self.confusion_matrix))
-        total_pixels = np.sum(self.confusion_matrix)
+        total_correct = np.sum(np.diag(self.hist))
+        total_pixels = np.sum(self.hist)
         results['Overall_Acc'] = total_correct / total_pixels if total_pixels > 0 else 0.0
-        
+
         # Frequency weighted IoU
-        freq = np.sum(self.confusion_matrix, axis=1) / np.sum(self.confusion_matrix)
+        freq = np.sum(self.hist, axis=1) / np.sum(self.hist)
         results['FWIoU'] = np.sum(freq * iou_per_class)
-        
+
         return results
     
     def get_confusion_matrix(self):

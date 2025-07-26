@@ -4,22 +4,21 @@
 # Adapted from PyTorch version for Jittor framework
 
 # Set environment variables
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+export CUDA_VISIBLE_DEVICES="0"
 
 # Evaluation configuration
-GPUS=8
-CONFIG="local_configs.NYUDepthv2.DFormerv2_S"
-CHECKPOINT="checkpoints/trained/DFormerv2_Small_NYU.pkl"
+GPUS=1
+CONFIG="local_configs.NYUDepthv2.DFormer_Large"
+CHECKPOINT="checkpoints/trained/NYUv2_DFormer_Large.pth"
 
-# Run evaluation
+# Run evaluation using the fixed eval.py script
 python utils/eval.py \
     --config=$CONFIG \
     --gpus=$GPUS \
-    --sliding \
-    --syncbn \
-    --amp \
-    --pad_SUNRGBD \
-    --continue_fpath=$CHECKPOINT
+    --continue_fpath=$CHECKPOINT \
+    --multi_scale \
+    --flip \
+    --verbose
 
 # Available configurations and checkpoints:
 

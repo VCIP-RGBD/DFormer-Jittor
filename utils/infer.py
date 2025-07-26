@@ -9,303 +9,277 @@ It supports both single image and batch inference with various model configurati
 import argparse
 import importlib
 import os
+import random
 import sys
 import time
 from importlib import import_module
+
 import numpy as np
 import jittor as jt
 from jittor import nn
+try:
+    from tensorboardX import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    print("Warning: tensorboardX not found, tensorboard logging disabled")
+    SummaryWriter = None
+    HAS_TENSORBOARD = False
 from tqdm import tqdm
 
-# Add project root to Python path
+# Add project root to Python path to ensure proper imports
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from models.builder import EncoderDecoder as segmodel
-from utils.dataloader.dataloader import ValPre, get_val_loader
+from utils.dataloader.dataloader import ValPre, get_train_loader, get_val_loader
 from utils.dataloader.RGBXDataset import RGBXDataset
+from utils.engine.engine import Engine
 from utils.engine.logger import get_logger
-from utils.jt_utils import load_model
+from utils.init_func import group_weight, init_weight
+from utils.lr_policy import WarmUpPolyLR
+from utils.jt_utils import all_reduce_tensor, ensure_dir, link_file, load_model, parse_devices
 from utils.val_mm import evaluate, evaluate_msf
 
+# Set random seeds for reproducibility
+# SEED=1
+# np.random.seed(SEED)
+# jt.set_global_seed(SEED)
 
-def parse_args():
-    """Parse command line arguments for inference."""
-    parser = argparse.ArgumentParser(description='DFormer Jittor Inference')
-    parser.add_argument("--config", required=True, help="Model config file path")
-    parser.add_argument("--continue_fpath", required=True, help="Checkpoint file path")
-    parser.add_argument("--save_path", default="output/", help="Output directory for predictions")
-    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--show_image", "-s", action="store_true", help="Show inference images")
-    parser.add_argument("--multi_scale", action="store_true", help="Enable multi-scale inference")
-    parser.add_argument("--flip", action="store_true", help="Enable flip augmentation")
-    parser.add_argument("--scales", nargs='+', type=float, default=[1.0], 
-                       help="Scales for multi-scale inference")
-    parser.add_argument("--eval_only", action="store_true", help="Only run evaluation, no saving")
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", help="train config file path")
+parser.add_argument("--gpus", help="used gpu number")
+# parser.add_argument('-d', '--devices', default='0,1', type=str)
+parser.add_argument("-v", "--verbose", default=False, action="store_true")
+parser.add_argument("--epochs", default=0)
+parser.add_argument("--show_image", "-s", default=False, action="store_true")
+parser.add_argument("--save_path", default=None)
+parser.add_argument("--checkpoint_dir")
+parser.add_argument("--continue_fpath")
+# Additional parameters for compatibility with infer.sh
+parser.add_argument("--multi_scale", default=False, action="store_true", help="Enable multi-scale inference")
+parser.add_argument("--scales", nargs='+', type=float, default=[1.0], help="Scales for multi-scale inference") 
+parser.add_argument("--flip", default=False, action="store_true", help="Enable flip augmentation")
+parser.add_argument("--eval_only", default=False, action="store_true", help="Only run evaluation, no saving")
+# parser.add_argument('--save_path', '-p', default=None)
+logger = get_logger()
+
+# os.environ['MASTER_PORT'] = '169710'
+
+with Engine(custom_parser=parser) as engine:
+    args = parser.parse_args()
+    config = getattr(import_module(args.config), "C")
+    config.pad = False  # Do not pad when inference
+    if "x_modal" not in config:
+        config["x_modal"] = "d"
     
-    return parser.parse_args()
+    # Enable Jittor CUDA if available
+    if jt.has_cuda:
+        jt.flags.use_cuda = 1
+    else:
+        jt.flags.use_cuda = 0
+        logger.warning("CUDA not available, using CPU")
 
+    val_loader, val_sampler = get_val_loader(engine, RGBXDataset, config, int(args.gpus))
+    print(len(val_loader))
 
-def load_config(config_path):
-    """Load configuration from config file."""
-    try:
-        config = getattr(import_module(config_path), "C")
-        config.pad = False  # Disable padding for inference
-        
-        # Set default x_modal if not present
-        if "x_modal" not in config:
-            config["x_modal"] = "d"
-            
-        return config
-    except Exception as e:
-        raise RuntimeError(f"Failed to load config from {config_path}: {e}")
+    if (engine.distributed and (engine.local_rank == 0)) or (not engine.distributed):
+        if HAS_TENSORBOARD and hasattr(config, 'tb_dir') and config.tb_dir:
+            tb_dir = config.tb_dir + "/{}".format(time.strftime("%b%d_%d-%H-%M", time.localtime()))
+            generate_tb_dir = config.tb_dir + "/tb"
+            tb = SummaryWriter(log_dir=tb_dir)
+            engine.link_tb(tb_dir, generate_tb_dir)
+        else:
+            logger.info("TensorBoard logging disabled (no tensorboardX or tb_dir not configured)")
 
+    if engine.distributed:
+        # Use SyncBatchNorm for distributed training in Jittor
+        BatchNorm2d = nn.SyncBatchNorm
+    else:
+        BatchNorm2d = nn.BatchNorm2d
 
-def create_model(config):
-    """Create and configure model for inference."""
-    # Set batch normalization layer
-    BatchNorm2d = nn.BatchNorm2d
-    
-    # Create model
     model = segmodel(cfg=config, norm_layer=BatchNorm2d)
     
-    return model
+    # Load model weights - Jittor can directly load PyTorch checkpoints
+    if args.continue_fpath:
+        logger.info(f"Loading checkpoint from {args.continue_fpath}")
+        try:
+            # Load PyTorch checkpoint and get the state_dict
+            import torch
+            checkpoint = torch.load(args.continue_fpath, map_location='cpu')
 
-
-def load_checkpoint(model, checkpoint_path):
-    """Load model weights from checkpoint."""
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    
-    logger = get_logger()
-    logger.info(f"Loading checkpoint from {checkpoint_path}")
-    
-    try:
-        # Load checkpoint using Jittor utils
-        model = load_model(model, checkpoint_path)
-        logger.info("Checkpoint loaded successfully")
-        return model
-    except Exception as e:
-        logger.error(f"Failed to load checkpoint: {e}")
-        raise
-
-
-def setup_data_loader(config, num_gpus=1):
-    """Setup validation data loader."""
-    logger = get_logger()
-
-    # Create dummy engine for data loader compatibility
-    class DummyEngine:
-        def __init__(self):
-            self.distributed = False
-            self.local_rank = 0
-
-    engine = DummyEngine()
-
-    # Use smaller batch size for inference to avoid memory issues
-    val_batch_size = 1  # Use batch size of 1 for inference
-
-    try:
-        # Get validation data loader
-        val_loader, val_sampler = get_val_loader(engine, RGBXDataset, config, val_batch_size)
-        logger.info(f"Created data loader with {len(val_loader)} batches")
-
-        # Limit to first 10 batches for testing to avoid hanging
-        if hasattr(val_loader, 'dataset'):
-            original_len = len(val_loader.dataset)
-            if original_len > 10:
-                logger.info(f"Limiting dataset from {original_len} to 10 samples for testing")
-                # RGBXDataset uses _file_names, not data_list
-                if hasattr(val_loader.dataset, '_file_names'):
-                    val_loader.dataset._file_names = val_loader.dataset._file_names[:10]
-                elif hasattr(val_loader.dataset, 'data_list'):
-                    val_loader.dataset.data_list = val_loader.dataset.data_list[:10]
-
-        return val_loader
-    except Exception as e:
-        logger.error(f"Failed to create data loader: {e}")
-        raise
-
-
-def run_inference(model, val_loader, config, args):
-    """Run model inference on validation data."""
-    logger = get_logger()
-    logger.info("Starting inference...")
-
-    # Set model to evaluation mode
-    model.eval()
-
-    # Ensure all BatchNorm layers are in eval mode
-    for name, module in model.named_modules():
-        if isinstance(module, jt.nn.BatchNorm2d):
-            module.eval()
-
-    # Setup device - use CPU to avoid memory issues
-    jt.flags.use_cuda = 0
-    logger.info("Using CPU for inference")
-
-    # Disable Jittor compilation optimization to avoid hanging
-    if hasattr(jt.flags, 'auto_mixed_precision_level'):
-        jt.flags.auto_mixed_precision_level = 0
-    if hasattr(jt.flags, 'compile_optimize_level'):
-        jt.flags.compile_optimize_level = 0
-
-    # Run inference with no gradient computation
-    try:
-        if args.multi_scale or len(args.scales) > 1 or args.flip:
-            # Multi-scale inference - use simplified version to avoid hanging
-            logger.info("Running multi-scale inference...")
-
-            if args.simple_msf:
-                # Ultra-simplified mode: only single scale with optional flip
-                scales = [1.0]
-                logger.info("Using simplified multi-scale mode (single scale only)")
+            # In case the checkpoint is nested, e.g., {'model': state_dict}
+            if 'model' in checkpoint:
+                weight = checkpoint['model']
             else:
-                scales = args.scales if args.scales != [1.0] else [1.0, 1.25]  # Use fewer scales to avoid hanging
+                weight = checkpoint
 
-            # Force CPU mode for multi-scale to avoid memory issues
-            jt.flags.use_cuda = 0
-            logger.info("Using CPU for multi-scale inference to avoid memory issues")
+            # Create key mapping for PyTorch to Jittor conversion
+            def convert_pytorch_keys_to_jittor(pytorch_state_dict):
+                """Convert PyTorch checkpoint keys to Jittor model keys."""
+                jittor_state_dict = {}
 
-            results = evaluate_msf(
-                model,
-                val_loader,
-                scales=scales,
-                flip=args.flip,
-                verbose=args.verbose
-            )
+                for k, v in pytorch_state_dict.items():
+                    new_key = k
+
+                    # Convert PyTorch tensor to numpy array for Jittor
+                    if hasattr(v, 'detach'):
+                        v = v.detach().cpu().numpy()
+
+                    # Key mappings for decode_head
+                    if 'decode_head.conv_seg' in k:
+                        new_key = k.replace('decode_head.conv_seg', 'decode_head.cls_seg')
+                    elif 'decode_head.squeeze.bn' in k:
+                        new_key = k.replace('decode_head.squeeze.bn', 'decode_head.squeeze.norm')
+                    elif 'decode_head.hamburger.ham_out.bn' in k:
+                        new_key = k.replace('decode_head.hamburger.ham_out.bn', 'decode_head.hamburger.ham_out.norm')
+                    elif 'decode_head.align.bn' in k:
+                        new_key = k.replace('decode_head.align.bn', 'decode_head.align.norm')
+
+                    # Skip num_batches_tracked keys as they are not needed in Jittor
+                    if 'num_batches_tracked' in k:
+                        continue
+
+                    # Skip backbone norm keys that don't exist in Jittor model
+                    if any(x in k for x in ['backbone.norm0', 'backbone.norm1', 'backbone.norm2', 'backbone.norm3']):
+                        continue
+
+                    jittor_state_dict[new_key] = v
+
+                return jittor_state_dict
+
+            # Convert PyTorch keys to Jittor keys
+            converted_weight = convert_pytorch_keys_to_jittor(weight)
+
+            # Non-strict loading of parameters
+            model_dict = model.state_dict()
+
+            # Filter checkpoint weights to match model keys
+            load_dict = {k: v for k, v in converted_weight.items() if k in model_dict}
+
+            # Convert numpy arrays to Jittor tensors and load
+            jittor_load_dict = {}
+            for k, v in load_dict.items():
+                if isinstance(v, np.ndarray):
+                    jittor_load_dict[k] = jt.array(v)
+                else:
+                    jittor_load_dict[k] = v
+
+            # Load parameters into model
+            model.load_parameters(jittor_load_dict)
+
+            missing_keys = [k for k in model_dict.keys() if k not in converted_weight]
+            unexpected_keys = [k for k in converted_weight.keys() if k not in model_dict]
+
+            if missing_keys:
+                logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+            if unexpected_keys:
+                logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+
+            logger.info("Model weights loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            logger.warning("Continuing with random initialization")
+
+    if engine.distributed:
+        logger.info(".............distributed training.............")
+        if jt.has_cuda:
+            model.cuda()
+            # Note: Jittor handles distributed training differently than PyTorch
+            # The model doesn't need explicit DistributedDataParallel wrapping
         else:
-            # Standard single-scale inference
-            logger.info("Running standard inference...")
-            results = evaluate(
+            logger.warning("CUDA not available for distributed training")
+    else:
+        if jt.has_cuda:
+            model.cuda()
+
+    engine.register_state(dataloader=val_loader, model=model)
+
+    logger.info("Begin testing:")
+    best_miou = 0.0
+    data_setting = {
+        "rgb_root": config.rgb_root_folder,
+        "rgb_format": config.rgb_format,
+        "gt_root": config.gt_root_folder,
+        "gt_format": config.gt_format,
+        "transform_gt": config.gt_transform,
+        "x_root": config.x_root_folder,
+        "x_format": config.x_format,
+        "x_single_channel": config.x_is_single_channel,
+        "class_names": config.class_names,
+        "train_source": config.train_source,
+        "eval_source": config.eval_source,
+        "class_names": config.class_names,
+    }
+    
+    all_dev = [0]
+
+    if engine.distributed:
+        print("Multi GPU test")
+        with jt.no_grad():
+            model.eval()
+            # Set all models in evaluation mode
+            for name, module in model.named_modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.eval()
+                    
+            # Use same parameters as PyTorch version
+            eval_scales = [0.5, 0.75, 1.0, 1.25, 1.5] if args.multi_scale else [1.0]  # Single scale for faster inference
+            eval_flip = True if args.flip else False  # Disable flip by default for faster inference
+            eval_save_dir = args.save_path
+
+            all_metrics = evaluate_msf(
                 model,
                 val_loader,
-                verbose=args.verbose
+                config,
+                None,  # device not needed in Jittor
+                eval_scales,
+                eval_flip,
+                engine,
+                save_dir=eval_save_dir,
             )
-    except Exception as e:
-        logger.error(f"Inference failed: {e}")
-        # Return dummy results for testing
-        results = {
-            'mIoU': 0.0,
-            'mAcc': 0.0,
-            'Overall_Acc': 0.0,
-            'FWIoU': 0.0
-        }
+            
+            if engine.local_rank == 0:
+                # Handle distributed metrics aggregation like PyTorch version
+                if isinstance(all_metrics, list):
+                    # Distributed case - aggregate metrics
+                    metric = all_metrics[0]
+                    for other_metric in all_metrics[1:]:
+                        metric.update_hist(other_metric.hist)
+                else:
+                    metric = all_metrics
 
-    return results
+                ious, miou = metric.compute_iou()
+                acc, macc = metric.compute_pixel_acc()
+                f1, mf1 = metric.compute_f1()
+                print(miou, "---------")
+    else:
+        with jt.no_grad():
+            model.eval()
+            # Set all BatchNorm layers in evaluation mode
+            for name, module in model.named_modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.eval()
+                    
+            # Use same parameters as PyTorch version
+            eval_scales = [0.5, 0.75, 1.0, 1.25, 1.5] if args.multi_scale else [1.0]  # Single scale for faster inference
+            eval_flip = True if args.flip else False  # Disable flip by default for faster inference
+            eval_save_dir = args.save_path
 
+            # Run multi-scale evaluation
+            metric = evaluate_msf(
+                model,
+                val_loader,
+                config,
+                None,  # device not needed in Jittor
+                eval_scales,
+                eval_flip,
+                engine,
+                save_dir=eval_save_dir,
+            )
 
-def print_results(results):
-    """Print inference results."""
-    logger = get_logger()
-
-    try:
-        # Print results
-        logger.info("Inference Results:")
-        logger.info("-" * 50)
-        logger.info(f"mIoU: {results.get('mIoU', 0.0):.4f}")
-        logger.info(f"mAcc: {results.get('mAcc', 0.0):.4f}")
-        logger.info(f"Overall Acc: {results.get('Overall_Acc', 0.0):.4f}")
-        logger.info(f"FWIoU: {results.get('FWIoU', 0.0):.4f}")
-        logger.info("-" * 50)
-
-        # Print per-class IoU if available
-        if 'IoU_per_class' in results:
-            logger.info("Per-class IoU:")
-            for i, iou in enumerate(results['IoU_per_class']):
-                logger.info(f"  Class {i}: {iou:.4f}")
-
-        return results
-
-    except Exception as e:
-        logger.error(f"Failed to print metrics: {e}")
-        return {}
-
-
-def main():
-    """Main inference function."""
-    # Parse arguments
-    args = parse_args()
-    
-    # Setup logger
-    logger = get_logger()
-    logger.info("DFormer Jittor Inference")
-    logger.info(f"Config: {args.config}")
-    logger.info(f"Checkpoint: {args.continue_fpath}")
-    logger.info(f"Save path: {args.save_path}")
-    logger.info(f"GPUs: {args.gpus}")
-    
-    try:
-        # Load configuration
-        config = load_config(args.config)
-        logger.info("Configuration loaded successfully")
-        
-        # Create output directory
-        if args.save_path and not args.eval_only:
-            os.makedirs(args.save_path, exist_ok=True)
-            logger.info(f"Output directory: {args.save_path}")
-        
-        # Create model
-        model = create_model(config)
-        logger.info("Model created successfully")
-        
-        # Load checkpoint
-        model = load_checkpoint(model, args.continue_fpath)
-        
-        # Setup data loader
-        val_loader = setup_data_loader(config, args.gpus)
-        
-        # Prepare data setting for compatibility
-        data_setting = {
-            "rgb_root": config.rgb_root_folder,
-            "rgb_format": config.rgb_format,
-            "gt_root": config.gt_root_folder,
-            "gt_format": config.gt_format,
-            "transform_gt": config.gt_transform,
-            "x_root": config.x_root_folder,
-            "x_format": config.x_format,
-            "x_single_channel": config.x_is_single_channel,
-            "class_names": config.class_names,
-            "train_source": config.train_source,
-            "eval_source": config.eval_source,
-        }
-        
-        # Run inference
-        start_time = time.time()
-        results = run_inference(model, val_loader, config, args)
-        end_time = time.time()
-
-        # Print results
-        results = print_results(results)
-        
-        logger.info(f"Inference completed in {end_time - start_time:.2f} seconds")
-        
-        # Save results to file if specified
-        if args.save_path and not args.eval_only:
-            results_file = os.path.join(args.save_path, "inference_results.txt")
-            with open(results_file, 'w') as f:
-                f.write("DFormer Jittor Inference Results\n")
-                f.write("=" * 40 + "\n")
-                f.write(f"Config: {args.config}\n")
-                f.write(f"Checkpoint: {args.continue_fpath}\n")
-                f.write(f"Multi-scale: {args.multi_scale}\n")
-                f.write(f"Scales: {args.scales}\n")
-                f.write(f"Flip: {args.flip}\n")
-                f.write("-" * 40 + "\n")
-                for key, value in results.items():
-                    if key != 'IoUs' and key != 'IoU_per_class':
-                        if isinstance(value, (int, float)):
-                            f.write(f"{key}: {value:.4f}\n")
-                        else:
-                            f.write(f"{key}: {value}\n")
-            logger.info(f"Results saved to {results_file}")
-        
-    except Exception as e:
-        logger.error(f"Inference failed: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main() 
+            ious, miou = metric.compute_iou()
+            acc, macc = metric.compute_pixel_acc()
+            f1, mf1 = metric.compute_f1()
+            print("miou", miou)

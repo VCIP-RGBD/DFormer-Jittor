@@ -120,22 +120,15 @@ class TrainPre(object):
             rgb, gt, modal_x, scale = random_scale(rgb, gt, modal_x, self.config.train_scale_array)
 
         rgb = normalize(rgb, self.norm_mean, self.norm_std)
-        
-        # Handle modal_x normalization based on actual channels
-        if self.sign:
-            if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
-                # Single channel depth image (DFormerv2)
-                modal_x = normalize(modal_x, [0.48], [0.28])
-            else:
-                # Multi-channel depth image (DFormerv1)
-                modal_x = normalize(modal_x, [0.48, 0.48, 0.48], [0.28, 0.28, 0.28])
+
+        # Use fixed depth normalization parameters to match PyTorch version
+        # This is critical for model performance!
+        if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
+            # Single channel depth image (DFormerv2)
+            modal_x = normalize(modal_x, [0.48], [0.28])
         else:
-            if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
-                # Single channel depth image
-                modal_x = normalize(modal_x, [self.norm_mean[0]], [self.norm_std[0]])
-            else:
-                # Multi-channel depth image
-                modal_x = normalize(modal_x, self.norm_mean, self.norm_std)
+            # Multi-channel depth image (DFormerv1) - use same parameters as PyTorch
+            modal_x = normalize(modal_x, [0.48, 0.48, 0.48], [0.28, 0.28, 0.28])
 
         crop_size = (self.config.image_height, self.config.image_width)
         crop_pos = generate_random_crop_pos(rgb.shape[:2], crop_size)
@@ -162,22 +155,15 @@ class ValPre(object):
     def __call__(self, rgb, gt, modal_x):
         """Apply preprocessing to validation data."""
         rgb = normalize(rgb, self.norm_mean, self.norm_std)
-        
-        # Handle modal_x normalization based on actual channels
-        if self.sign:
-            if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
-                # Single channel depth image (DFormerv2)
-                modal_x = normalize(modal_x, [0.48], [0.28])
-            else:
-                # Multi-channel depth image (DFormerv1)
-                modal_x = normalize(modal_x, [0.48, 0.48, 0.48], [0.28, 0.28, 0.28])
+
+        # Use fixed depth normalization parameters to match PyTorch version
+        # This is critical for model performance!
+        if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
+            # Single channel depth image (DFormerv2)
+            modal_x = normalize(modal_x, [0.48], [0.28])
         else:
-            if len(modal_x.shape) == 3 and modal_x.shape[2] == 1:
-                # Single channel depth image
-                modal_x = normalize(modal_x, [self.norm_mean[0]], [self.norm_std[0]])
-            else:
-                # Multi-channel depth image
-                modal_x = normalize(modal_x, self.norm_mean, self.norm_std)
+            # Multi-channel depth image (DFormerv1) - use same parameters as PyTorch
+            modal_x = normalize(modal_x, [0.48, 0.48, 0.48], [0.28, 0.28, 0.28])
 
         rgb = rgb.transpose(2, 0, 1)
         modal_x = modal_x.transpose(2, 0, 1)

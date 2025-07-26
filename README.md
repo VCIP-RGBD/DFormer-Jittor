@@ -32,6 +32,32 @@ This repository contains the official Jittor implementation of the following pap
 > [Chinese Version](https://mftp.mmcheng.net/Papers/25CVPR_RGBDSeg-CN.pdf) |
 > [PyTorch Version](https://github.com/VCIP-RGBD/DFormer)
 
+---
+
+## <p align="center">✨ About the Jittor Framework: An Architectural Deep Dive ✨</p>
+
+This project is built upon [Jittor](https://cg.cs.tsinghua.edu.cn/jittor/), a cutting-edge deep learning framework that pioneers a design centered around **Just-In-Time (JIT) compilation** and **meta-operators**. This architecture provides a unique combination of high performance and exceptional flexibility. Instead of relying on static, pre-compiled libraries, Jittor operates as a dynamic, programmable system that compiles itself and the user's code on the fly.
+
+### The Core Philosophy: From Static Library to Dynamic Compiler
+
+Jittor's design philosophy is to treat the deep learning framework not as a fixed set of tools, but as a domain-specific compiler. The high-level Python code written by the user serves as a directive to this compiler, which then generates highly optimized, hardware-specific machine code at runtime. This approach unlocks a level of performance and flexibility that is difficult to achieve with traditional frameworks.
+
+### Key Innovations of Jittor
+
+*   **A Truly Just-in-Time (JIT) Compiled Framework**:
+    > Jittor's most significant innovation is that **the entire framework is JIT compiled**. This goes beyond merely compiling a static computation graph. When a Jittor program runs, the Python code, including the core framework logic and the user's model, is first parsed into an intermediate representation. The Jittor compiler then performs a series of advanced optimizations—such as operator fusion, memory layout optimization, and dead code elimination—before generating and executing native C++ or CUDA code. This "whole-program" compilation approach means that the framework can adapt to the specific logic of your model, enabling optimizations that are impossible when linking against a static, pre-compiled library.
+
+*   **Meta-Operators and Dynamic Kernel Fusion**:
+    > At the heart of Jittor lies the concept of **meta-operators**. These are not monolithic, pre-written kernels (like in other frameworks), but rather elementary building blocks defined in Python. For instance, a complex operation like `Conv2d` followed by `ReLU` is not two separate kernel calls. Instead, Jittor composes them from meta-operators, and its JIT compiler **fuses** them into a single, efficient CUDA kernel at runtime. This **kernel fusion** is critical for performance on modern accelerators like GPUs, as it drastically reduces the time spent on high-latency memory I/O and kernel launch overhead, which are often the primary bottlenecks.
+
+*   **The Unified Computation Graph: Flexibility Meets Performance**:
+    > Jittor elegantly resolves the classic trade-off between the flexibility of dynamic graphs (like PyTorch) and the performance of static graphs (like TensorFlow 1.x). You can write your model using all the native features of Python, including complex control flow like `if/else` statements and data-dependent `for` loops. Jittor's compiler traces these dynamic execution paths and still constructs a graph representation that it can optimize globally. It achieves this by JIT-compiling different graph versions for different execution paths, thus preserving Python's expressiveness without sacrificing optimization potential.
+
+*   **Decoupling of Frontend Logic and Backend Optimization**:
+    > Jittor champions a clean separation that empowers researchers. You focus on the "what"—the mathematical logic of your model—using a clean, high-level Python API. Jittor's backend automatically handles the "how"—the complex task of writing high-performance, hardware-specific code. This frees researchers who are experts in their domain (e.g., computer vision) from needing to become experts in low-level GPU programming, thus accelerating the pace of innovation.
+
+---
+
 ## 🚀 Getting Started
 
 ### Environment Setup
@@ -200,16 +226,13 @@ When Jittor loads/compiles external CUDA libraries, it automatically compiles se
 The install_cutlass() function in version 1.3.9.14 uses a download link that has become invalid (confirmed by community Issue #642).  
 After the download fails, a partial ~/.cache/jittor/cutlass directory is left behind; when running the function again, it attempts to execute shutil.rmtree('.../cutlass/cutlass'), but this subdirectory does not exist, triggering a FileNotFoundError and ultimately causing the main process to core dump.
 
-### Solutions (Choose one, in recommended order)
+### 解决方案 (按推荐顺序选择其一)
 
-| 方案                      | 操作步骤                                                                                                                                                                                                                                                                                                                    | 适用场景                            |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| **1️⃣ 临时跳过 CUTLASS**    | `bash\n# 仅对当前 shell 生效\nexport use_cutlass=0\npython3.8 -m jittor.test.test_cudnn_op\n`                                                                                                                                                                                                                                 | 只想先跑通 cuDNN 单测 / 不需要 CUTLASS 算子 |
-| **2️⃣ 手动安装 CUTLASS**    | `bash\n# 清理残留\nrm -rf ~/.cache/jittor/cutlass\n\n# 手动克隆最新版\nmkdir -p ~/.cache/jittor/cutlass && \\\ncd ~/.cache/jittor/cutlass && \\\ngit clone --depth 1 https://github.com/NVIDIA/cutlass.git cutlass\n\n# 再次运行\npython3.8 -m jittor.test.test_cudnn_op\n` | 仍想保留 CUTLASS 相关算子功能             |
-| **3️⃣ 升级 Jittor 至修复版本** | `bash\npip install -U jittor jittor-utils\n`社区 1.3.9.15+ 已把失效链接改到镜像源，升级后即可自动重新下载。                                                                                                                                                                                                                                       | 允许升级环境并希望后续自动管理                 |
-
-
-
+| 方案 | 操作步骤 | 适用场景 |
+|------|---------|----------|
+| **1️⃣ 临时跳过 CUTLASS** | ```bash<br># 仅对当前 shell 生效<br>export use_cutlass=0<br>python3.8 -m jittor.test.test_cudnn_op<br>``` | 只想先跑通 cuDNN 单测 / 不需要 CUTLASS 算子 |
+| **2️⃣ 手动安装 CUTLASS** | ```bash<br># 清理残留<br>rm -rf ~/.cache/jittor/cutlass<br><br># 手动克隆最新版<br>mkdir -p ~/.cache/jittor/cutlass && \<br>cd ~/.cache/jittor/cutlass && \<br>git clone --depth 1 https://github.com/NVIDIA/cutlass.git cutlass<br><br># 再次运行<br>python3.8 -m jittor.test.test_cudnn_op<br>``` | 仍想保留 CUTLASS 相关算子功能 |
+| **3️⃣ 升级 Jittor 至修复版本** | ```bash<br>pip install -U jittor jittor-utils<br>```<br><br>社区 1.3.9.15+ 已把失效链接改到镜像源，升级后即可自动重新下载。 | 允许升级环境并希望后续自动管理 |
 
 ## 🤝 Contributing
 
