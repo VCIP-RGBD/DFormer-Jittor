@@ -11,13 +11,14 @@ GPUS=1
 CONFIG="local_configs.NYUDepthv2.DFormer_Large"
 CHECKPOINT="checkpoints/trained/NYUv2_DFormer_Large.pth"
 
-# Run evaluation using the fixed eval.py script
+# Run evaluation using advanced settings to match PyTorch baseline
 python utils/eval.py \
     --config=$CONFIG \
     --gpus=$GPUS \
     --continue_fpath=$CHECKPOINT \
     --multi_scale \
     --flip \
+    --sliding \
     --verbose
 
 # Available configurations and checkpoints:

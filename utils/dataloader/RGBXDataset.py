@@ -248,12 +248,16 @@ class RGBXDataset(Dataset):
 
     def _gt_transform(self, gt):
         """Transform ground truth labels."""
-        # NYU Depth v2 specific transform
+        # NYU Depth v2 specific transform - map labels 1-40 to 0-39, label 0 becomes 255 (ignore)
         if self.dataset_name == "NYUDepthv2":
-            # Map 40 classes
+            # This is critical! PyTorch version does gt - 1
+            # Labels 1-40 become 0-39, label 0 becomes 255 (ignore index)
+            gt = gt.astype(np.int64)
+            gt = gt - 1
+            gt[gt == -1] = 255  # Set ignore index for invalid pixels
             return gt
         elif self.dataset_name == "SUNRGBD":
             # Map 37 classes
-            return gt
+            return gt - 1
         else:
             return gt

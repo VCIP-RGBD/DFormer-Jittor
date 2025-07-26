@@ -89,23 +89,27 @@ def main():
     print("Starting evaluation...")
     start_time = time.time()
     
-    if args.sliding:
-        # Sliding window evaluation
-        results = evaluate_sliding_window(
-            model, val_loader, args.window_size, args.stride, args.verbose
-        )
-    elif args.multi_scale or len(args.scales) > 1 or args.flip:
-        # Multi-scale evaluation
+    # Use advanced evaluation settings to match PyTorch baseline
+    if args.multi_scale or args.flip or args.sliding:
+        # Multi-scale evaluation with flip and/or sliding window
         if args.multi_scale:
-            scales = [0.5, 0.75, 1.0, 1.25, 1.5]
+            # Use aggressive multi-scale setup to maximize performance
+            scales = [0.5, 0.75, 1.0, 1.25, 1.5]  # 5-scale setup for best results
         else:
-            scales = args.scales
+            scales = [1.0]  # Single scale
+
+        print(f"Using advanced evaluation:")
+        print(f"  Scales: {scales}")
+        print(f"  Flip augmentation: {args.flip}")
+        print(f"  Sliding window: {args.sliding}")
+
         metric = evaluate_msf(
             model, val_loader, config=config, scales=scales, flip=args.flip, sliding=args.sliding
         )
         results = metric.get_results()
     else:
         # Standard evaluation
+        print("Using standard evaluation (single scale, no augmentation)")
         results = evaluate(model, val_loader, verbose=args.verbose)
     
     end_time = time.time()

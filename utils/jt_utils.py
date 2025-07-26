@@ -89,6 +89,13 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
 
     print(f"Converting {total_pytorch_params} PyTorch parameters to Jittor format...")
 
+    # Parameter name mapping from PyTorch to Jittor
+    param_mapping = {
+        'decode_head.conv_seg.weight': 'decode_head.cls_seg.weight',
+        'decode_head.conv_seg.bias': 'decode_head.cls_seg.bias',
+        # Add more mappings if needed
+    }
+
     # Convert weights with exact key and shape matches
     for pytorch_key, pytorch_tensor in pytorch_state_dict.items():
         # Skip num_batches_tracked parameters (not needed in Jittor)
@@ -96,25 +103,31 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
             skipped_count += 1
             continue
 
+        # Map parameter names if needed
+        jittor_key = param_mapping.get(pytorch_key, pytorch_key)
+
         # Check if the key exists in Jittor model
-        if pytorch_key in jittor_state_dict:
+        if jittor_key in jittor_state_dict:
             try:
                 # Convert PyTorch tensor to numpy then to Jittor
                 numpy_tensor = pytorch_tensor.detach().cpu().numpy()
                 jittor_tensor = jt.array(numpy_tensor)
 
                 # Check shape compatibility
-                expected_shape = jittor_state_dict[pytorch_key].shape
+                expected_shape = jittor_state_dict[jittor_key].shape
                 if tuple(jittor_tensor.shape) == tuple(expected_shape):
-                    jittor_state_dict[pytorch_key] = jittor_tensor
+                    jittor_state_dict[jittor_key] = jittor_tensor
                     converted_count += 1
-                    if converted_count <= 10:  # Only print first 10 for brevity
-                        print(f"✓ Converted: {pytorch_key}")
+                    if converted_count <= 10 or jittor_key != pytorch_key:  # Print first 10 and all mapped keys
+                        if jittor_key != pytorch_key:
+                            print(f"✓ Converted (mapped): {pytorch_key} -> {jittor_key}")
+                        else:
+                            print(f"✓ Converted: {pytorch_key}")
                 else:
-                    print(f"✗ Shape mismatch for {pytorch_key}: expected {expected_shape}, got {jittor_tensor.shape}")
+                    print(f"✗ Shape mismatch for {jittor_key}: expected {expected_shape}, got {jittor_tensor.shape}")
                     skipped_count += 1
             except Exception as e:
-                print(f"✗ Error converting {pytorch_key}: {e}")
+                print(f"✗ Error converting {pytorch_key} -> {jittor_key}: {e}")
                 skipped_count += 1
         else:
             skipped_count += 1
