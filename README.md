@@ -59,13 +59,13 @@ Jittor's design philosophy is to treat the deep learning framework not as a fixe
 ---
 ## 🚩 Performance
 <p align="center">
-    <img src="./figs/Figure_1.png" width="600"  width="1200"/> <br />
+    <img src="figs/Figure_1.png" width="600"  width="1200"/> <br />
     <em> 
     Chart 1: Comparison of mIoU changes between Jittor implementation and Pytorch implementation of Dformer-Large.
     </em>
 </p>
 <p align="center">
-    <img src="./figs/latency_comparison.png" width="600"  width="1200"/> <br />
+    <img src="figs/latency_comparison.png" width="600"  width="1200"/> <br />
     <em> 
     Chart 2: Comparisons of lantency between Jittor implementation and Pytorch implementation
     </em>
