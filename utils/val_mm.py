@@ -79,7 +79,7 @@ def slide_inference(model, image, modal_x, config):
     return seg_logits
 
 
-def evaluate(model, data_loader, device=None, verbose=False):
+def evaluate(model, data_loader, device=None, verbose=False, save_dir=None, config=None):
     """Evaluate model on validation dataset."""
     model.eval()
 
@@ -139,6 +139,42 @@ def evaluate(model, data_loader, device=None, verbose=False):
                         print(f"Error converting to numpy: {e}")
                         print(f"predictions type: {type(predictions)}, targets type: {type(targets)}")
                         continue
+
+                    # Save predictions if save_dir is provided
+                    if save_dir is not None:
+                        import pathlib
+                        import matplotlib.pyplot as plt
+
+                        # Get filename from minibatch
+                        if 'fn' in minibatch:
+                            names = minibatch["fn"][0].replace(".jpg", "").replace(".png", "").replace("datasets/", "")
+                            save_name = save_dir + "/" + names + "_pred.png"
+                            pathlib.Path(save_name).parent.mkdir(parents=True, exist_ok=True)
+
+                            # Convert predictions to numpy
+                            preds = pred_numpy.squeeze().astype(np.uint8)
+
+                            if config and hasattr(config, 'dataset_name'):
+                                if config.dataset_name in ["NYUDepthv2", "SUNRGBD"]:
+                                    try:
+                                        palette = np.load("./utils/nyucmap.npy")
+                                        preds = palette[preds]
+                                        plt.imsave(save_name, preds)
+                                        if verbose:
+                                            print(f"Saved colored prediction: {save_name}")
+                                    except Exception as e:
+                                        print(f"Warning: Could not load NYU color palette: {e}")
+                                        # Fallback to grayscale
+                                        import cv2
+                                        cv2.imwrite(save_name, preds)
+                                        if verbose:
+                                            print(f"Saved grayscale prediction: {save_name}")
+                                else:
+                                    # Fallback to grayscale for other datasets
+                                    import cv2
+                                    cv2.imwrite(save_name, preds)
+                                    if verbose:
+                                        print(f"Saved grayscale prediction: {save_name}")
 
                     # Update metrics
                     metric.update(pred_numpy, target_numpy)
@@ -302,16 +338,85 @@ def evaluate_msf(model, data_loader, config=None, device=None, scales=[1.0], fli
                 if isinstance(predictions, tuple):
                     predictions = predictions[0]
 
+                # Save predictions if save_dir is provided (same format as PyTorch)
+                if save_dir is not None:
+                    import pathlib
+                    import matplotlib.pyplot as plt
+                    from matplotlib.colors import ListedColormap
+
+                    # Get filename from minibatch
+                    if 'fn' in minibatch:
+                        names = minibatch["fn"][0].replace(".jpg", "").replace(".png", "").replace("datasets/", "")
+                        save_name = save_dir + "/" + names + "_pred.png"
+                        pathlib.Path(save_name).parent.mkdir(parents=True, exist_ok=True)
+
+                        # Convert predictions to numpy
+                        preds = predictions.numpy().squeeze().astype(np.uint8)
+
+                        if config and hasattr(config, 'dataset_name'):
+                            if config.dataset_name in ["KITTI-360", "EventScape"]:
+                                palette = [
+                                    [128, 64, 128], [244, 35, 232], [70, 70, 70], [102, 102, 156],
+                                    [190, 153, 153], [153, 153, 153], [250, 170, 30], [220, 220, 0],
+                                    [107, 142, 35], [152, 251, 152], [70, 130, 180], [220, 20, 60],
+                                    [255, 0, 0], [0, 0, 142], [0, 0, 70], [0, 60, 100],
+                                    [0, 80, 100], [0, 0, 230], [119, 11, 32],
+                                ]
+                                palette = np.array(palette, dtype=np.uint8)
+                                preds = palette[preds]
+                                plt.imsave(save_name, preds)
+                            elif config.dataset_name in ["NYUDepthv2", "SUNRGBD"]:
+                                try:
+                                    palette = np.load("./utils/nyucmap.npy")
+                                    preds = palette[preds]
+                                    plt.imsave(save_name, preds)
+                                    print(f"Saved colored prediction: {save_name}")
+                                except Exception as e:
+                                    print(f"Warning: Could not load NYU color palette: {e}")
+                                    # Fallback to grayscale
+                                    import cv2
+                                    cv2.imwrite(save_name, preds)
+                                    print(f"Saved grayscale prediction: {save_name}")
+                            elif config.dataset_name in ["MFNet"]:
+                                palette = np.array([
+                                    [0, 0, 0], [64, 0, 128], [64, 64, 0], [0, 128, 192],
+                                    [0, 0, 192], [128, 128, 0], [64, 64, 128], [192, 128, 128],
+                                    [192, 64, 0],
+                                ], dtype=np.uint8)
+                                preds = palette[preds]
+                                plt.imsave(save_name, preds)
+                                print(f"Saved colored prediction: {save_name}")
+                            else:
+                                # Fallback to grayscale
+                                import cv2
+                                cv2.imwrite(save_name, preds)
+                                print(f"Saved grayscale prediction: {save_name}")
+                        else:
+                            # Fallback to grayscale
+                            import cv2
+                            cv2.imwrite(save_name, preds)
+                            print(f"Saved grayscale prediction: {save_name}")
+
                 # Update metrics
                 pred_numpy = predictions.numpy()
                 label_numpy = labels.numpy()
                 metric.update(pred_numpy, label_numpy)
 
+                # Clean memory every 20 batches to prevent accumulation
+                if (idx + 1) % 20 == 0:
+                    jt.clean()
+
             except Exception as e:
                 print(f"Error processing batch {idx}: {e}")
                 continue
 
-    return metric
+    # Return metric object for compatibility with PyTorch version
+    if engine and engine.distributed:
+        # For distributed evaluation, we would need to gather metrics
+        # For now, return the local metric
+        return metric
+    else:
+        return metric
 
 
 

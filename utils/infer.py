@@ -232,11 +232,11 @@ with Engine(custom_parser=parser) as engine:
             all_metrics = evaluate_msf(
                 model,
                 val_loader,
-                config,
-                None,  # device not needed in Jittor
-                eval_scales,
-                eval_flip,
-                engine,
+                config=config,
+                scales=eval_scales,
+                flip=eval_flip,
+                sliding=False,  # Disable sliding for faster inference
+                engine=engine,
                 save_dir=eval_save_dir,
             )
             
@@ -271,11 +271,11 @@ with Engine(custom_parser=parser) as engine:
             metric = evaluate_msf(
                 model,
                 val_loader,
-                config,
-                None,  # device not needed in Jittor
-                eval_scales,
-                eval_flip,
-                engine,
+                config=config,
+                scales=eval_scales,
+                flip=eval_flip,
+                sliding=False,  # Disable sliding for faster inference
+                engine=engine,
                 save_dir=eval_save_dir,
             )
 

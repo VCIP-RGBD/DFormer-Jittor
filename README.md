@@ -57,6 +57,8 @@ Jittor's design philosophy is to treat the deep learning framework not as a fixe
     > Jittor champions a clean separation that empowers researchers. You focus on the "what"—the mathematical logic of your model—using a clean, high-level Python API. Jittor's backend automatically handles the "how"—the complex task of writing high-performance, hardware-specific code. This frees researchers who are experts in their domain (e.g., computer vision) from needing to become experts in low-level GPU programming, thus accelerating the pace of innovation.
 
 ---
+![Figure 1](./figs/Figure_1.png)
+![Latency Comparison](./figs/latency_comparison.png)
 
 ## 🚀 Getting Started
 
