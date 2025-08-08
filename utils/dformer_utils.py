@@ -508,12 +508,12 @@ def _clean_state_dict_keys(state_dict):
     
     # Key mappings for common PyTorch to Jittor differences
     key_mappings = {
-        # Normalization layer mappings
-        'backbone.norm0': 'backbone.downsample_layers.0.1',
-        'backbone.norm1': 'backbone.downsample_layers.1.0',
-        'backbone.norm2': 'backbone.downsample_layers.2.0', 
-        'backbone.norm3': 'backbone.downsample_layers.3.0',
-        
+        # Normalization layer mappings (these don't exist in Jittor model)
+        # 'backbone.norm0': 'backbone.downsample_layers.0.1',
+        # 'backbone.norm1': 'backbone.downsample_layers.1.0',
+        # 'backbone.norm2': 'backbone.downsample_layers.2.0',
+        # 'backbone.norm3': 'backbone.downsample_layers.3.0',
+
         # Decoder head mappings
         'decode_head.conv_seg': 'decode_head.cls_seg',
         'decode_head.squeeze.bn': 'decode_head.squeeze.norm',
@@ -536,9 +536,19 @@ def _clean_state_dict_keys(state_dict):
             if cleaned_key.startswith(old_pattern):
                 cleaned_key = cleaned_key.replace(old_pattern, new_pattern, 1)
                 break
-                
+
+        # Handle DFormerv2 LayerScale parameters: gamma_1 -> gamma1, gamma_2 -> gamma2
+        if 'gamma_1' in cleaned_key:
+            cleaned_key = cleaned_key.replace('gamma_1', 'gamma1')
+        elif 'gamma_2' in cleaned_key:
+            cleaned_key = cleaned_key.replace('gamma_2', 'gamma2')
+
         # Skip keys that are specific to PyTorch BatchNorm tracking
         if '.num_batches_tracked' in cleaned_key:
+            continue
+
+        # Skip backbone norm parameters that don't exist in Jittor model
+        if any(x in cleaned_key for x in ['backbone.norm0', 'backbone.norm1', 'backbone.norm2', 'backbone.norm3']):
             continue
             
         cleaned_state_dict[cleaned_key] = value

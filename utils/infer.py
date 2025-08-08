@@ -136,6 +136,12 @@ with Engine(custom_parser=parser) as engine:
                     elif 'decode_head.align.bn' in k:
                         new_key = k.replace('decode_head.align.bn', 'decode_head.align.norm')
 
+                    # Handle DFormerv2 LayerScale parameters: gamma_1 -> gamma1, gamma_2 -> gamma2
+                    if 'gamma_1' in new_key:
+                        new_key = new_key.replace('gamma_1', 'gamma1')
+                    elif 'gamma_2' in new_key:
+                        new_key = new_key.replace('gamma_2', 'gamma2')
+
                     # Skip num_batches_tracked keys as they are not needed in Jittor
                     if 'num_batches_tracked' in k:
                         continue

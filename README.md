@@ -1,10 +1,25 @@
 # <p align=center>`DFormer for RGBD Semantic Segmentation (Jittor Implementation)`</p>
-
 <p align="center">
+    <br>
+    <img src="figs/logo_2.png"/>
+    <br>
+<p>
+<p align="center">
+<a href="https://github.com/VCIP-RGBD/DFormer-Jittor">项目主页</a>
+<br>
+        <a href="README_CN.md">中文</a>&nbsp ｜ &nbsp<a href="README.md">English&nbsp
+</p>
+<p align="center">
+<img src="https://img.shields.io/badge/python-3.8+-blue.svg">
+<img src="https://img.shields.io/badge/jittor-1.3.9+-orange.svg">
+<a href="https://github.com/VCIP-RGBD/DFormer-Jittor/blob/master/LICENSE"><img src="https://img.shields.io/github/license/VCIP-RGBD/DFormer-Jittor"></a>
+<a href="https://github.com/VCIP-RGBD/DFormer-Jittor/pulls"><img src="https://img.shields.io/badge/PR-welcome-55EB99.svg"></a>
+</p>
+<!-- <p align="center">
     <img src="https://img.shields.io/badge/Framework-Jittor-brightgreen" alt="Framework">
     <img src="https://img.shields.io/badge/License-Non--Commercial-red" alt="License">
     <img src="https://img.shields.io/badge/Python-3.8+-blue" alt="Python">
-</p>
+</p> -->
 
 This is the Jittor implementation of DFormer and DFormerv2 for RGBD semantic segmentation. Developed based on the Jittor deep learning framework, it provides efficient solutions for training and inference.
 
@@ -157,31 +172,21 @@ python utils/eval.py --config local_configs.NYUDepthv2.DFormer_Base --checkpoint
 bash infer.sh
 ```
 
-## 🎯 Performance
+## 🚩 Performance
 
-### NYUDepthv2 Dataset
+<p align="center">
+    <img src="figs/Semseg.jpg" width="600"  width="1200"/> <br />
+    <em> 
+    Table 1: Comparisons between the existing methods and our DFormer.
+    </em>
+</p>
 
-| Method | Backbone | mIoU | Params | FLOPs |
-|------|----------|------|--------|-------|
-| DFormer-T | DFormer-Tiny | 48.5 | 5.0M | 15.2G |
-| DFormer-S | DFormer-Small | 52.3 | 13.1M | 28.4G |
-| DFormer-B | DFormer-Base | 54.1 | 35.4M | 75.0G |
-| DFormer-L | DFormer-Large | 55.8 | 62.3M | 132.8G |
-| DFormerv2-S | DFormerv2-Small | 53.7 | 13.1M | 28.4G |
-| DFormerv2-B | DFormerv2-Base | 55.3 | 35.4M | 75.0G |
-| DFormerv2-L | DFormerv2-Large | 57.1 | 62.3M | 132.8G |
-
-### SUNRGBD Dataset
-
-| Method | Backbone | mIoU | Params | FLOPs |
-|------|----------|------|--------|-------|
-| DFormer-T | DFormer-Tiny | 46.2 | 5.0M | 15.2G |
-| DFormer-S | DFormer-Small | 49.8 | 13.1M | 28.4G |
-| DFormer-B | DFormer-Base | 51.6 | 35.4M | 75.0G |
-| DFormer-L | DFormer-Large | 53.4 | 62.3M | 132.8G |
-| DFormerv2-S | DFormerv2-Small | 51.2 | 13.1M | 28.4G |
-| DFormerv2-B | DFormerv2-Base | 52.8 | 35.4M | 75.0G |
-| DFormerv2-L | DFormerv2-Large | 54.5 | 62.3M | 132.8G |
+<p align="center">
+    <img src="figs/dformerv2_table.jpg" width="600"  width="1200"/> <br />
+    <em> 
+    Table 2: Comparisons between the existing methods and our DFormerv2.
+    </em>
+</p>
 
 ## 🔧 Configuration
 
@@ -290,7 +295,8 @@ If you use our work in your research, please cite the following papers:
 Our implementation is mainly based on the following open-source projects:
 
 - [Jittor](https://github.com/Jittor/jittor): A deep learning framework.
-- [DFormer](https://github.com/VCIP-RGBD/DFormer): The original PyTorch implementation.
+- [DFormer](https://github.com/VCIP-RGBD/DFormer): The original PyTorch implementat
+ion.
 - [mmsegmentation](https://github.com/open-mmlab/mmsegmentation): A semantic segmentation toolbox.
 
 Thanks to all the contributors for their efforts!

@@ -93,8 +93,8 @@ def main():
     if args.multi_scale or args.flip or args.sliding:
         # Multi-scale evaluation with flip and/or sliding window
         if args.multi_scale:
-            # Use aggressive multi-scale setup to maximize performance
-            scales = [0.5, 0.75, 1.0, 1.25, 1.5]  # 5-scale setup for best results
+            # Prefer user-specified scales if provided, else fallback to default 5-scale
+            scales = args.scales if args.scales and len(args.scales) > 0 else [0.5, 0.75, 1.0, 1.25, 1.5]
         else:
             scales = [1.0]  # Single scale
 

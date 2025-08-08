@@ -91,10 +91,44 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
 
     # Parameter name mapping from PyTorch to Jittor
     param_mapping = {
+        # Decoder head mappings
         'decode_head.conv_seg.weight': 'decode_head.cls_seg.weight',
         'decode_head.conv_seg.bias': 'decode_head.cls_seg.bias',
-        # Add more mappings if needed
+
+        # BatchNorm to LayerNorm/GroupNorm mappings for decoder head
+        'decode_head.squeeze.bn.weight': 'decode_head.squeeze.norm.weight',
+        'decode_head.squeeze.bn.bias': 'decode_head.squeeze.norm.bias',
+        'decode_head.squeeze.bn.running_mean': 'decode_head.squeeze.norm.running_mean',
+        'decode_head.squeeze.bn.running_var': 'decode_head.squeeze.norm.running_var',
+
+        'decode_head.hamburger.ham_out.bn.weight': 'decode_head.hamburger.ham_out.norm.weight',
+        'decode_head.hamburger.ham_out.bn.bias': 'decode_head.hamburger.ham_out.norm.bias',
+        'decode_head.hamburger.ham_out.bn.running_mean': 'decode_head.hamburger.ham_out.norm.running_mean',
+        'decode_head.hamburger.ham_out.bn.running_var': 'decode_head.hamburger.ham_out.norm.running_var',
+
+        'decode_head.align.bn.weight': 'decode_head.align.norm.weight',
+        'decode_head.align.bn.bias': 'decode_head.align.norm.bias',
+        'decode_head.align.bn.running_mean': 'decode_head.align.norm.running_mean',
+        'decode_head.align.bn.running_var': 'decode_head.align.norm.running_var',
     }
+
+    # Function to convert parameter names
+    def convert_param_name(pytorch_key):
+        # Apply direct mappings first
+        if pytorch_key in param_mapping:
+            return param_mapping[pytorch_key]
+
+        # Convert gamma_1 -> gamma1, gamma_2 -> gamma2 for DFormerv2 LayerScale
+        if 'gamma_1' in pytorch_key:
+            return pytorch_key.replace('gamma_1', 'gamma1')
+        elif 'gamma_2' in pytorch_key:
+            return pytorch_key.replace('gamma_2', 'gamma2')
+
+        # Skip backbone norm parameters that don't exist in Jittor model
+        if any(x in pytorch_key for x in ['backbone.norm0', 'backbone.norm1', 'backbone.norm2', 'backbone.norm3']):
+            return None  # Signal to skip this parameter
+
+        return pytorch_key
 
     # Convert weights with exact key and shape matches
     for pytorch_key, pytorch_tensor in pytorch_state_dict.items():
@@ -104,7 +138,14 @@ def load_pytorch_weights_basic(model, pytorch_checkpoint_path):
             continue
 
         # Map parameter names if needed
-        jittor_key = param_mapping.get(pytorch_key, pytorch_key)
+        jittor_key = convert_param_name(pytorch_key)
+
+        # Skip parameters that should not be converted (None return)
+        if jittor_key is None:
+            skipped_count += 1
+            if skipped_count <= 10:  # Print first few skipped keys for debugging
+                print(f"⚠ Skipped (not in Jittor model): {pytorch_key}")
+            continue
 
         # Check if the key exists in Jittor model
         if jittor_key in jittor_state_dict:
