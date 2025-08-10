@@ -85,7 +85,18 @@ Jittor's design philosophy is to treat the deep learning framework not as a fixe
     Chart 2: Comparisons of lantency between Jittor implementation and Pytorch implementation
     </em>
 </p>
-
+<p align="center">
+    <img src="figs/multi_model_eval_comparison.png" width="600"  width="1200"/> <br />
+    <em> 
+    Chart 3: Comparisons of evaluation time between Jittor implementation and Pytorch implementation
+    </em>
+</p>
+<p align="center">
+    <img src="figs/multi_model_scaling_analysis.png" width="600"  width="1200"/> <br />
+    <em> 
+    Chart 4: Comparisons of Model Size and Evaluation Time between Jittor implementation and Pytorch implementation
+    </em>
+</p>
 ## 🚀 Getting Started
 
 ### Environment Setup
